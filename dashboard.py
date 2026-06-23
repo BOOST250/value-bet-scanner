@@ -227,6 +227,8 @@ INDEX_HTML = """<!DOCTYPE html>
   .bucket-table tbody tr:hover { background:rgba(59,130,246,.05); }
   .bucket-table .green { color:var(--green); font-weight:600; }
   .bucket-table .red { color:var(--red); font-weight:600; }
+  .bucket-table tr.low-sample { opacity:.55; }
+  .sample-badge { font-size:9px; text-transform:uppercase; letter-spacing:.5px; color:var(--dim); border:1px solid var(--border); border-radius:4px; padding:1px 5px; margin-left:6px; cursor:help; }
 
   .empty { text-align:center; padding:60px; color:var(--dim); }
 
@@ -344,27 +346,30 @@ function renderTable(bets, showResult) {
   return h;
 }
 
+const MIN_SAMPLE_SIZE = 30;
+
 function bucketTable(title, rows, nameKey) {
   let h = '<div class="breakdown-card"><h3>' + title + '</h3>';
   h += '<table class="bucket-table"><thead><tr><th>' + (nameKey === 'label' ? 'Range' : nameKey.charAt(0).toUpperCase()+nameKey.slice(1)) + '</th><th>Total</th><th>W</th><th>L</th><th>Pending</th><th>Win%</th><th>ROI</th><th>Profit</th></tr></thead><tbody>';
   for (const r of rows) {
     if (r.total === 0) continue;
     const st = r.w + r.l;
+    const lowSample = st > 0 && st < MIN_SAMPLE_SIZE;
     const wr = st ? (r.w/st*100).toFixed(1)+'%' : '-';
     const profit = st ? ((r.profit_w || 0) - r.l) : null;
     const roi = st ? (profit / st * 100).toFixed(1) : '-';
     const roiCls = roi !== '-' ? (parseFloat(roi) >= 0 ? 'green' : 'red') : '';
     const wrCls = wr !== '-' ? (parseFloat(wr) >= 50 ? 'green' : 'red') : '';
     const profitCls = profit !== null ? (profit >= 0 ? 'green' : 'red') : '';
-    h += '<tr>';
-    h += '<td><strong>' + r[nameKey] + '</strong></td>';
+    h += '<tr' + (lowSample ? ' class="low-sample"' : '') + '>';
+    h += '<td><strong>' + r[nameKey] + '</strong>' + (lowSample ? ' <span class="sample-badge" title="Fewer than ' + MIN_SAMPLE_SIZE + ' settled bets — not statistically meaningful yet">low sample</span>' : '') + '</td>';
     h += '<td>' + r.total + '</td>';
     h += '<td>' + r.w + '</td>';
     h += '<td>' + r.l + '</td>';
     h += '<td>' + r.p + '</td>';
-    h += '<td class="' + wrCls + '">' + wr + '</td>';
-    h += '<td class="' + roiCls + '">' + (roi !== '-' ? (parseFloat(roi)>=0?'+':'') + roi + '%' : '-') + '</td>';
-    h += '<td class="' + profitCls + '">' + (profit !== null ? (profit>=0?'+':'') + profit.toFixed(1) + 'u' : '-') + '</td>';
+    h += '<td class="' + (lowSample ? '' : wrCls) + '">' + wr + '</td>';
+    h += '<td class="' + (lowSample ? '' : roiCls) + '">' + (roi !== '-' ? (parseFloat(roi)>=0?'+':'') + roi + '%' : '-') + '</td>';
+    h += '<td class="' + (lowSample ? '' : profitCls) + '">' + (profit !== null ? (profit>=0?'+':'') + profit.toFixed(1) + 'u' : '-') + '</td>';
     h += '</tr>';
   }
   h += '</tbody></table></div>';
