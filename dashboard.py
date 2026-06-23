@@ -218,6 +218,12 @@ INDEX_HTML = """<!DOCTYPE html>
 
   .ev-positive { color:var(--green); font-weight:600; }
 
+  .event-btn {
+    display:inline-block; padding:4px 10px; border-radius:6px; font-size:11px; font-weight:600;
+    color:var(--blue); border:1px solid var(--border); text-decoration:none; white-space:nowrap;
+  }
+  .event-btn:hover { background:rgba(59,130,246,.1); border-color:var(--blue); }
+
   .breakdown { display:grid; grid-template-columns:1fr 1fr; gap:16px; margin-top:16px; }
   .breakdown-card { background:var(--card); border:1px solid var(--border); border-radius:10px; padding:16px; }
   .breakdown-card h3 { font-size:14px; margin-bottom:12px; color:var(--dim); font-weight:600; text-transform:uppercase; letter-spacing:.5px; }
@@ -318,11 +324,26 @@ function renderStats(s) {
   ).join('');
 }
 
+const BOOKMAKER_DOMAINS = {
+  'Polymarket': 'polymarket.com',
+  'Kalshi': 'kalshi.com',
+};
+
+function eventUrl(b) {
+  const domain = BOOKMAKER_DOMAINS[b.bookmaker];
+  const query = (b.home||'') + ' ' + (b.away||'');
+  if (domain) {
+    return 'https://www.google.com/search?q=' + encodeURIComponent('site:' + domain + ' ' + query);
+  }
+  return 'https://www.google.com/search?q=' + encodeURIComponent((b.bookmaker||'') + ' ' + query);
+}
+
 function renderTable(bets, showResult) {
   if (!bets.length) return '<div class="empty">No bets found</div>';
   let h = '<table><thead><tr>' +
     '<th>Match</th><th>Sport</th><th>Bookmaker</th><th>Side</th><th>Market</th><th>Odds</th><th>EV</th>' +
     (showResult ? '<th>Score</th><th>Result</th>' : '<th>Kick-off</th><th>Detected</th>') +
+    '<th></th>' +
     '</tr></thead><tbody>';
   for (const b of bets) {
     h += '<tr>';
@@ -340,6 +361,7 @@ function renderTable(bets, showResult) {
       h += '<td>' + fmtDate(b.match_date) + '</td>';
       h += '<td>' + fmtDate(b.detected_at) + '</td>';
     }
+    h += '<td><a class="event-btn" href="' + eventUrl(b) + '" target="_blank" rel="noopener">Go to Event</a></td>';
     h += '</tr>';
   }
   h += '</tbody></table>';
