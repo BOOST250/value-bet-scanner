@@ -137,7 +137,7 @@ def init_db():
         cur = conn.cursor()
         cur.execute(CREATE_TABLE_PG)
         try:
-            cur.execute("SET statement_timeout = '60000'")
+            cur.execute("SET statement_timeout = '5000'")
             cur.execute("ALTER TABLE bets ADD COLUMN IF NOT EXISTS event_url TEXT")
         except Exception as e:
             print(f"  Warning: could not add event_url column: {e}")
