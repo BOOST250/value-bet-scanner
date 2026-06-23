@@ -330,6 +330,7 @@ const BOOKMAKER_DOMAINS = {
 };
 
 function eventUrl(b) {
+  if (b.event_url) return b.event_url;
   const domain = BOOKMAKER_DOMAINS[b.bookmaker];
   const query = (b.home||'') + ' ' + (b.away||'');
   if (domain) {

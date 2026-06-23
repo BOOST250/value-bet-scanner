@@ -38,8 +38,8 @@ def log_bet(conn, bet: dict) -> None:
         conn,
         """INSERT OR IGNORE INTO bets
            (id, event_id, bookmaker, bet_side, market, hdp, odds, expected_value,
-            home, away, sport, league, match_date, detected_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            home, away, sport, league, match_date, detected_at, event_url)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             bet["id"],
             bet.get("eventId"),
@@ -55,6 +55,7 @@ def log_bet(conn, bet: dict) -> None:
             event.get("league"),
             event.get("date"),
             datetime.now(timezone.utc).isoformat(),
+            odds_obj.get("href"),
         ),
     )
     database.commit(conn)

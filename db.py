@@ -101,7 +101,8 @@ CREATE_TABLE_SQLITE = """
         status        TEXT DEFAULT 'pending',
         home_score    INTEGER,
         away_score    INTEGER,
-        graded_at     TEXT
+        graded_at     TEXT,
+        event_url     TEXT
     )
 """
 
@@ -124,7 +125,8 @@ CREATE_TABLE_PG = """
         status        TEXT DEFAULT 'pending',
         home_score    INTEGER,
         away_score    INTEGER,
-        graded_at     TEXT
+        graded_at     TEXT,
+        event_url     TEXT
     )
 """
 
@@ -134,8 +136,12 @@ def init_db():
     if DATABASE_URL:
         cur = conn.cursor()
         cur.execute(CREATE_TABLE_PG)
+        cur.execute("ALTER TABLE bets ADD COLUMN IF NOT EXISTS event_url TEXT")
         cur.close()
     else:
         conn.execute(CREATE_TABLE_SQLITE)
+        existing = {row[1] for row in conn.execute("PRAGMA table_info(bets)").fetchall()}
+        if "event_url" not in existing:
+            conn.execute("ALTER TABLE bets ADD COLUMN event_url TEXT")
     conn.commit()
     return conn
