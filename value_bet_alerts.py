@@ -13,6 +13,7 @@ import db as database
 
 API_BASE = "https://api.odds-api.io/v3"
 POLL_INTERVAL = 360  # seconds between checks
+GRADE_EVERY_N = 3    # grade settled bets every Nth cycle
 
 API_KEY = os.environ.get("ODDS_API_KEY", "")
 DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL", "")
@@ -282,7 +283,7 @@ def send_discord_alert(bets: list[dict]) -> None:
 # Main loop
 # ---------------------------------------------------------------------------
 
-def run_once(conn, seen_ids: set[str], bookmakers: list[str], sport: str | None = None) -> int:
+def run_once(conn, seen_ids: set[str], bookmakers: list[str], sport: str | None = None, do_grade: bool = True) -> int:
     all_new: list[dict] = []
 
     for bookmaker in bookmakers:
@@ -310,7 +311,8 @@ def run_once(conn, seen_ids: set[str], bookmakers: list[str], sport: str | None 
         else:
             print("  (DISCORD_WEBHOOK_URL not set -- skipping alert)")
 
-    grade_bets(conn)
+    if do_grade:
+        grade_bets(conn)
     return len(all_new)
 
 
@@ -332,11 +334,14 @@ def main():
     seen_ids = load_seen_ids(conn)
     print(f"Value-bet scanner started | bookmakers={','.join(bookmakers)} sport={sport or 'all'}")
     print(f"Loaded {len(seen_ids)} previously seen bets from DB")
-    print(f"Polling every {POLL_INTERVAL}s. Press Ctrl+C to stop.\n")
+    print(f"Polling every {POLL_INTERVAL}s, grading every {GRADE_EVERY_N} cycles. Press Ctrl+C to stop.\n")
 
+    cycle = 0
     while True:
+        cycle += 1
+        do_grade = (cycle % GRADE_EVERY_N == 0)
         try:
-            run_once(conn, seen_ids, bookmakers, sport)
+            run_once(conn, seen_ids, bookmakers, sport, do_grade=do_grade)
         except Exception as e:
             print(f"  Unexpected error: {e}")
         time.sleep(POLL_INTERVAL)
