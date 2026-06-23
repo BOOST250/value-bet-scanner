@@ -136,7 +136,12 @@ def init_db():
     if DATABASE_URL:
         cur = conn.cursor()
         cur.execute(CREATE_TABLE_PG)
-        cur.execute("ALTER TABLE bets ADD COLUMN IF NOT EXISTS event_url TEXT")
+        try:
+            cur.execute("SET statement_timeout = '60000'")
+            cur.execute("ALTER TABLE bets ADD COLUMN IF NOT EXISTS event_url TEXT")
+        except Exception as e:
+            print(f"  Warning: could not add event_url column: {e}")
+            conn.rollback()
         cur.close()
     else:
         conn.execute(CREATE_TABLE_SQLITE)
