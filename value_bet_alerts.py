@@ -83,13 +83,24 @@ def grade_spread(home_score: int, away_score: int, bet_side: str, hdp: float) ->
     return "lost"
 
 
+def grade_totals(home_score: int, away_score: int, bet_side: str, hdp: float) -> str:
+    total = home_score + away_score
+    if total > hdp:
+        return "won" if bet_side == "home" else "lost"
+    if total < hdp:
+        return "lost" if bet_side == "home" else "won"
+    return "push"
+
+
 def grade_bet_row(row, home_score: int, away_score: int) -> str:
     market = row["market"]
     side = row["bet_side"]
-    if market in ("ML", "1X2"):
+    if market in ("ML", "1X2", "Moneyline"):
         return grade_ml(home_score, away_score, side)
-    if market == "Spread":
+    if market in ("Spread", "Map Handicap"):
         return grade_spread(home_score, away_score, side, row["hdp"] or 0)
+    if market in ("Totals", "Totals (Games)", "Total Maps"):
+        return grade_totals(home_score, away_score, side, row["hdp"] or 0)
     return "void"
 
 
