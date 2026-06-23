@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 import db as database
 
 API_BASE = "https://api.odds-api.io/v3"
-POLL_INTERVAL = 120  # seconds between checks
+POLL_INTERVAL = 360  # seconds between checks
 
 API_KEY = os.environ.get("ODDS_API_KEY", "")
 DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL", "")
