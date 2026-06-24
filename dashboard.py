@@ -6,6 +6,10 @@ Usage: python dashboard.py
 Then open http://localhost:5000
 """
 
+import re
+import time
+
+import requests
 from flask import Flask, jsonify, request
 
 import db as database
@@ -13,6 +17,79 @@ import db as database
 database.init_db()
 
 app = Flask(__name__)
+
+GAMMA_API = "https://gamma-api.polymarket.com"
+_EVENT_CACHE: dict[str, tuple[float, list | None]] = {}
+_EVENT_CACHE_TTL = 30  # seconds
+
+
+def get_event_markets(slug: str) -> list | None:
+    cached = _EVENT_CACHE.get(slug)
+    if cached and time.time() - cached[0] < _EVENT_CACHE_TTL:
+        return cached[1]
+    try:
+        resp = requests.get(f"{GAMMA_API}/events/slug/{slug}", timeout=5)
+        resp.raise_for_status()
+        markets = resp.json().get("markets", [])
+    except (requests.RequestException, ValueError):
+        markets = None
+    _EVENT_CACHE[slug] = (time.time(), markets)
+    return markets
+
+
+def _matching_liquidity(markets: list, predicate) -> float | None:
+    matches = [m for m in markets if predicate(m)]
+    if len(matches) != 1:
+        return None
+    try:
+        return float(matches[0]["liquidity"])
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def match_liquidity(markets: list, market_name: str, hdp) -> float | None:
+    if market_name in ("ML", "1X2", "Moneyline"):
+        return _matching_liquidity(markets, lambda m: not m.get("groupItemTitle"))
+
+    if market_name in ("Spread", "Map Handicap") and hdp is not None:
+        target = abs(float(hdp))
+        return _matching_liquidity(
+            markets,
+            lambda m: any(kw in (m.get("groupItemTitle") or "").lower() for kw in ("spread", "handicap"))
+            and "inning" not in (m.get("groupItemTitle") or "").lower()
+            and _trailing_number(m.get("groupItemTitle")) == target,
+        )
+
+    if market_name in ("Totals", "Totals (Games)", "Total Maps") and hdp is not None:
+        target = abs(float(hdp))
+        return _matching_liquidity(
+            markets,
+            lambda m: "o/u" in (m.get("groupItemTitle") or "").lower()
+            and "inning" not in (m.get("groupItemTitle") or "").lower()
+            and _trailing_number(m.get("groupItemTitle")) == target,
+        )
+
+    return None
+
+
+def _trailing_number(title: str | None) -> float | None:
+    if not title:
+        return None
+    m = re.search(r"[-+]?\d+\.?\d*$", title)
+    return abs(float(m.group())) if m else None
+
+
+def attach_liquidity(bets: list) -> list:
+    for b in bets:
+        b["liquidity"] = None
+        if b.get("bookmaker") != "Polymarket" or not b.get("event_url"):
+            continue
+        slug = b["event_url"].rstrip("/").rsplit("/", 1)[-1]
+        markets = get_event_markets(slug)
+        if not markets:
+            continue
+        b["liquidity"] = match_liquidity(markets, b.get("market"), b.get("hdp"))
+    return bets
 
 
 @app.route("/")
@@ -31,6 +108,7 @@ def api_live():
         bets = [b for b in bets if b["sport"] == sport]
     if bookmaker:
         bets = [b for b in bets if b["bookmaker"] == bookmaker]
+    attach_liquidity(bets)
     return jsonify(bets)
 
 
@@ -373,11 +451,16 @@ function sideLabel(b) {
   return b.bet_side || '-';
 }
 
+function fmtLiquidity(v) {
+  if (v == null) return '-';
+  return '$' + Math.round(v).toLocaleString();
+}
+
 function renderTable(bets, showResult) {
   if (!bets.length) return '<div class="empty">No bets found</div>';
   let h = '<table><thead><tr>' +
     '<th>Match</th><th>Sport</th><th>Bookmaker</th><th>Side</th><th>Market</th><th>Odds</th><th>EV</th>' +
-    (showResult ? '<th>Score</th><th>Result</th>' : '<th>Kick-off</th><th>Detected</th>') +
+    (showResult ? '<th>Score</th><th>Result</th>' : '<th>Liquidity</th><th>Kick-off</th><th>Detected</th>') +
     '<th></th>' +
     '</tr></thead><tbody>';
   for (const b of bets) {
@@ -393,6 +476,7 @@ function renderTable(bets, showResult) {
       h += '<td>' + (b.home_score != null ? b.home_score + '-' + b.away_score : '-') + '</td>';
       h += '<td><span class="badge ' + b.status + '">' + b.status.toUpperCase() + '</span></td>';
     } else {
+      h += '<td title="Total liquidity in this specific market line, live from Polymarket">' + fmtLiquidity(b.liquidity) + '</td>';
       h += '<td>' + fmtDate(b.match_date) + '</td>';
       h += '<td>' + fmtDate(b.detected_at) + '</td>';
     }
