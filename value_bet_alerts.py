@@ -29,11 +29,19 @@ def load_seen_ids(conn) -> set[str]:
     return {r["id"] for r in rows}
 
 
+# The API names this market "Moneyline" for esports and "ML" everywhere else, even
+# though it's the same bet type. Normalize at write time so it isn't fragmented across
+# two rows in every breakdown/aggregation downstream.
+MARKET_NAME_ALIASES = {"Moneyline": "ML", "1X2": "ML"}
+
+
 def log_bet(conn, bet: dict) -> None:
     event = bet.get("event", {})
     market = bet.get("market", {})
     odds_obj = bet.get("bookmakerOdds", {})
     side = bet.get("betSide", "")
+    market_name = market.get("name")
+    market_name = MARKET_NAME_ALIASES.get(market_name, market_name)
     database.execute(
         conn,
         """INSERT OR IGNORE INTO bets
@@ -45,7 +53,7 @@ def log_bet(conn, bet: dict) -> None:
             bet.get("eventId"),
             bet.get("bookmaker"),
             side,
-            market.get("name"),
+            market_name,
             market.get("hdp"),
             float(odds_obj.get(side, 0)),
             bet.get("expectedValue"),

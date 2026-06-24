@@ -565,6 +565,9 @@ function sideLabel(b) {
     if (b.bet_side === 'home') return 'Over';
     if (b.bet_side === 'away') return 'Under';
   }
+  if (b.bet_side === 'home') return b.home || 'Home';
+  if (b.bet_side === 'away') return b.away || 'Away';
+  if (b.bet_side === 'draw') return 'Draw';
   return b.bet_side || '-';
 }
 
