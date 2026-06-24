@@ -6,6 +6,7 @@ Usage: python dashboard.py
 Then open http://localhost:5000
 """
 
+import json
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -20,57 +21,33 @@ database.init_db()
 app = Flask(__name__)
 
 GAMMA_API = "https://gamma-api.polymarket.com"
+CLOB_API = "https://clob.polymarket.com"
+_CACHE_TTL = 30  # seconds
 _EVENT_CACHE: dict[str, tuple[float, list | None]] = {}
-_EVENT_CACHE_TTL = 30  # seconds
+_BOOK_CACHE: dict[str, tuple[float, dict | None]] = {}
+
+
+def _cached_get(cache: dict, key: str, url: str, params: dict | None = None):
+    cached = cache.get(key)
+    if cached and time.time() - cached[0] < _CACHE_TTL:
+        return cached[1]
+    try:
+        resp = requests.get(url, params=params, timeout=5)
+        resp.raise_for_status()
+        data = resp.json()
+    except (requests.RequestException, ValueError):
+        data = None
+    cache[key] = (time.time(), data)
+    return data
 
 
 def get_event_markets(slug: str) -> list | None:
-    cached = _EVENT_CACHE.get(slug)
-    if cached and time.time() - cached[0] < _EVENT_CACHE_TTL:
-        return cached[1]
-    try:
-        resp = requests.get(f"{GAMMA_API}/events/slug/{slug}", timeout=5)
-        resp.raise_for_status()
-        markets = resp.json().get("markets", [])
-    except (requests.RequestException, ValueError):
-        markets = None
-    _EVENT_CACHE[slug] = (time.time(), markets)
-    return markets
+    data = _cached_get(_EVENT_CACHE, slug, f"{GAMMA_API}/events/slug/{slug}")
+    return data.get("markets", []) if data else None
 
 
-def _matching_liquidity(markets: list, predicate) -> float | None:
-    matches = [m for m in markets if predicate(m)]
-    if len(matches) != 1:
-        return None
-    try:
-        return float(matches[0]["liquidity"])
-    except (KeyError, TypeError, ValueError):
-        return None
-
-
-def match_liquidity(markets: list, market_name: str, hdp) -> float | None:
-    if market_name in ("ML", "1X2", "Moneyline"):
-        return _matching_liquidity(markets, lambda m: not m.get("groupItemTitle"))
-
-    if market_name in ("Spread", "Map Handicap") and hdp is not None:
-        target = abs(float(hdp))
-        return _matching_liquidity(
-            markets,
-            lambda m: any(kw in (m.get("groupItemTitle") or "").lower() for kw in ("spread", "handicap"))
-            and "inning" not in (m.get("groupItemTitle") or "").lower()
-            and _trailing_number(m.get("groupItemTitle")) == target,
-        )
-
-    if market_name in ("Totals", "Totals (Games)", "Total Maps") and hdp is not None:
-        target = abs(float(hdp))
-        return _matching_liquidity(
-            markets,
-            lambda m: "o/u" in (m.get("groupItemTitle") or "").lower()
-            and "inning" not in (m.get("groupItemTitle") or "").lower()
-            and _trailing_number(m.get("groupItemTitle")) == target,
-        )
-
-    return None
+def get_order_book(token_id: str) -> dict | None:
+    return _cached_get(_BOOK_CACHE, token_id, f"{CLOB_API}/book", {"token_id": token_id})
 
 
 def _trailing_number(title: str | None) -> float | None:
@@ -80,28 +57,124 @@ def _trailing_number(title: str | None) -> float | None:
     return abs(float(m.group())) if m else None
 
 
+def _find_market(markets: list, market_name: str, hdp) -> dict | None:
+    """Return the one sub-market matching our market+hdp, or None if zero/ambiguous matches."""
+    if market_name in ("ML", "1X2", "Moneyline"):
+        matches = [m for m in markets if not m.get("groupItemTitle")]
+    elif market_name in ("Spread", "Map Handicap") and hdp is not None:
+        target = abs(float(hdp))
+        matches = [
+            m for m in markets
+            if any(kw in (m.get("groupItemTitle") or "").lower() for kw in ("spread", "handicap"))
+            and "inning" not in (m.get("groupItemTitle") or "").lower()
+            and _trailing_number(m.get("groupItemTitle")) == target
+        ]
+    elif market_name in ("Totals", "Totals (Games)", "Total Maps") and hdp is not None:
+        target = abs(float(hdp))
+        matches = [
+            m for m in markets
+            if "o/u" in (m.get("groupItemTitle") or "").lower()
+            and "inning" not in (m.get("groupItemTitle") or "").lower()
+            and _trailing_number(m.get("groupItemTitle")) == target
+        ]
+    else:
+        matches = []
+    return matches[0] if len(matches) == 1 else None
+
+
+_STOPWORDS = {"the", "fc", "sc", "cf", "afc", "club"}
+
+
+def _name_tokens(name: str) -> set:
+    words = re.findall(r"[a-z]+", name.lower())
+    return {w for w in words if len(w) >= 4 and w not in _STOPWORDS}
+
+
+def _parse_json_field(value):
+    if isinstance(value, str):
+        try:
+            return json.loads(value)
+        except ValueError:
+            return []
+    return value or []
+
+
+def _outcome_token(market: dict, market_name: str, bet_side: str, home: str, away: str) -> str | None:
+    outcomes = _parse_json_field(market.get("outcomes"))
+    token_ids = _parse_json_field(market.get("clobTokenIds"))
+    if len(outcomes) != 2 or len(token_ids) != 2:
+        return None
+
+    if market_name in ("Totals", "Totals (Games)", "Total Maps", "Totals HT"):
+        lowered = [o.lower() for o in outcomes]
+        if "over" not in lowered or "under" not in lowered:
+            return None
+        wanted = "over" if bet_side == "home" else "under"
+        return token_ids[lowered.index(wanted)]
+
+    target = _name_tokens(home if bet_side == "home" else away)
+    if not target:
+        return None
+    hits = [i for i, o in enumerate(outcomes) if target & _name_tokens(o)]
+    return token_ids[hits[0]] if len(hits) == 1 else None
+
+
+def _best_ask_depth(book: dict | None) -> tuple[float, float] | tuple[None, None]:
+    """Returns (price, dollar size) at the best (lowest) ask, i.e. what you'd pay right now."""
+    if not book:
+        return None, None
+    asks = book.get("asks") or []
+    if not asks:
+        return None, None
+    try:
+        best = min(asks, key=lambda a: float(a["price"]))
+        price = float(best["price"])
+        size = float(best["size"])
+    except (KeyError, TypeError, ValueError):
+        return None, None
+    return price, round(size * price, 2)
+
+
 def attach_liquidity(bets: list) -> list:
     for b in bets:
         b["liquidity"] = None
+        b["liquidity_price"] = None
 
-    slugs = {
-        b["event_url"].rstrip("/").rsplit("/", 1)[-1]
-        for b in bets
-        if b.get("bookmaker") == "Polymarket" and b.get("event_url")
-    }
-    uncached = [s for s in slugs if not (_EVENT_CACHE.get(s) and time.time() - _EVENT_CACHE[s][0] < _EVENT_CACHE_TTL)]
-    if uncached:
+    polymarket_bets = [b for b in bets if b.get("bookmaker") == "Polymarket" and b.get("event_url")]
+    slugs = {b["event_url"].rstrip("/").rsplit("/", 1)[-1] for b in polymarket_bets}
+    uncached_slugs = [s for s in slugs if not (_EVENT_CACHE.get(s) and time.time() - _EVENT_CACHE[s][0] < _CACHE_TTL)]
+    if uncached_slugs:
         with ThreadPoolExecutor(max_workers=20) as pool:
-            pool.map(get_event_markets, uncached)
+            pool.map(get_event_markets, uncached_slugs)
 
-    for b in bets:
-        if b.get("bookmaker") != "Polymarket" or not b.get("event_url"):
-            continue
+    token_by_bet: dict[int, str] = {}
+    for b in polymarket_bets:
         slug = b["event_url"].rstrip("/").rsplit("/", 1)[-1]
         markets = get_event_markets(slug)
         if not markets:
             continue
-        b["liquidity"] = match_liquidity(markets, b.get("market"), b.get("hdp"))
+        market = _find_market(markets, b.get("market"), b.get("hdp"))
+        if not market:
+            continue
+        token = _outcome_token(market, b.get("market"), b.get("bet_side"), b.get("home"), b.get("away"))
+        if token:
+            token_by_bet[id(b)] = token
+
+    uncached_tokens = [
+        t for t in set(token_by_bet.values())
+        if not (_BOOK_CACHE.get(t) and time.time() - _BOOK_CACHE[t][0] < _CACHE_TTL)
+    ]
+    if uncached_tokens:
+        with ThreadPoolExecutor(max_workers=20) as pool:
+            pool.map(get_order_book, uncached_tokens)
+
+    for b in polymarket_bets:
+        token = token_by_bet.get(id(b))
+        if not token:
+            continue
+        price, size = _best_ask_depth(get_order_book(token))
+        b["liquidity"] = size
+        b["liquidity_price"] = price
     return bets
 
 
@@ -464,9 +537,10 @@ function sideLabel(b) {
   return b.bet_side || '-';
 }
 
-function fmtLiquidity(v) {
-  if (v == null) return '-';
-  return '$' + Math.round(v).toLocaleString();
+function fmtLiquidity(b) {
+  if (b.liquidity == null) return '-';
+  const cents = b.liquidity_price != null ? Math.round(b.liquidity_price * 100) : null;
+  return '$' + Math.round(b.liquidity).toLocaleString() + (cents != null ? ' @ ' + cents + '¢' : '');
 }
 
 function renderTable(bets, showResult) {
@@ -489,7 +563,7 @@ function renderTable(bets, showResult) {
       h += '<td>' + (b.home_score != null ? b.home_score + '-' + b.away_score : '-') + '</td>';
       h += '<td><span class="badge ' + b.status + '">' + b.status.toUpperCase() + '</span></td>';
     } else {
-      h += '<td title="Total liquidity in this specific market line, live from Polymarket">' + fmtLiquidity(b.liquidity) + '</td>';
+      h += '<td title="Size available at the current best price for your side, live from Polymarket\'s order book">' + fmtLiquidity(b) + '</td>';
       h += '<td>' + fmtDate(b.match_date) + '</td>';
       h += '<td>' + fmtDate(b.detected_at) + '</td>';
     }
