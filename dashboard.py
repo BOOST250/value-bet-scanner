@@ -22,9 +22,12 @@ app = Flask(__name__)
 
 GAMMA_API = "https://gamma-api.polymarket.com"
 CLOB_API = "https://clob.polymarket.com"
+KALSHI_API = "https://api.elections.kalshi.com/trade-api/v2"
 _CACHE_TTL = 30  # seconds
 _EVENT_CACHE: dict[str, tuple[float, list | None]] = {}
 _BOOK_CACHE: dict[str, tuple[float, dict | None]] = {}
+_KALSHI_CACHE: dict[str, tuple[float, list | None]] = {}
+_KALSHI_LAST_TRY: dict[str, float] = {}
 
 
 def _cached_get(cache: dict, key: str, url: str, params: dict | None = None):
@@ -166,6 +169,34 @@ def _best_ask_depth(book: dict | None) -> tuple[float, float] | tuple[None, None
     return price, round(size * price, 2)
 
 
+def get_kalshi_markets(event_ticker: str) -> list | None:
+    data = _cached_get(_KALSHI_CACHE, event_ticker, f"{KALSHI_API}/markets", {"event_ticker": event_ticker})
+    return data.get("markets", []) if data else None
+
+
+def _kalshi_outcome_market(markets: list, bet_side: str, home: str, away: str) -> dict | None:
+    """ML-only: each Kalshi market here is a separate binary 'Will X win?' contract, one
+    per team, with no draw market in this set -- so a clean single-team-name match works."""
+    target = _name_tokens(home if bet_side == "home" else away)
+    if not target:
+        return None
+    hits = [m for m in markets if target & _name_tokens(m.get("yes_sub_title") or m.get("title") or "")]
+    return hits[0] if len(hits) == 1 else None
+
+
+def _kalshi_best_ask(market: dict | None) -> tuple[float, float] | tuple[None, None]:
+    if not market:
+        return None, None
+    try:
+        price = float(market["yes_ask_dollars"])
+        size = float(market["yes_ask_size_fp"])
+    except (KeyError, TypeError, ValueError):
+        return None, None
+    if price <= 0 or size <= 0:
+        return None, None
+    return price, round(size * price, 2)
+
+
 def attach_liquidity(bets: list) -> list:
     for b in bets:
         b["liquidity"] = None
@@ -206,6 +237,38 @@ def attach_liquidity(bets: list) -> list:
         price, size = _best_ask_depth(get_order_book(token))
         b["liquidity"] = size
         b["liquidity_price"] = price
+
+    # Kalshi rate-limits on concurrency (~1 in-flight request per IP), not request volume --
+    # any parallelism here returns a wave of 429s. Fetch serially and cap how many tickers we
+    # fetch per call, always picking the least-recently-tried ones first, so a single request
+    # never blocks for the 15-20+ seconds a full serial sweep would take. The lookup loop below
+    # only reads whatever's already cached -- it never triggers a fetch itself -- so coverage
+    # rotates across distinct tickers over a few of the dashboard's 15s auto-refresh polls
+    # instead of always retrying the same first N and starving the rest.
+    KALSHI_FETCH_CAP = 15
+    kalshi_bets = [b for b in bets if b.get("bookmaker") == "Kalshi" and b.get("market") == "ML" and b.get("event_url")]
+    tickers = {b["event_url"].rstrip("/").rsplit("/", 1)[-1].upper() for b in kalshi_bets}
+    uncached_tickers = [
+        t for t in tickers if not (_KALSHI_CACHE.get(t) and time.time() - _KALSHI_CACHE[t][0] < _CACHE_TTL)
+    ]
+    uncached_tickers.sort(key=lambda t: _KALSHI_LAST_TRY.get(t, 0.0))
+    for t in uncached_tickers[:KALSHI_FETCH_CAP]:
+        _KALSHI_LAST_TRY[t] = time.time()
+        get_kalshi_markets(t)
+
+    for b in kalshi_bets:
+        ticker = b["event_url"].rstrip("/").rsplit("/", 1)[-1].upper()
+        cached = _KALSHI_CACHE.get(ticker)
+        if not cached or not cached[1]:
+            continue
+        markets = cached[1].get("markets", [])
+        if not markets:
+            continue
+        market = _kalshi_outcome_market(markets, b.get("bet_side"), b.get("home"), b.get("away"))
+        price, size = _kalshi_best_ask(market)
+        b["liquidity"] = size
+        b["liquidity_price"] = price
+
     return bets
 
 
@@ -597,7 +660,7 @@ function renderTable(bets, showResult) {
       h += '<td>' + (b.home_score != null ? b.home_score + '-' + b.away_score : '-') + '</td>';
       h += '<td><span class="badge ' + b.status + '">' + b.status.toUpperCase() + '</span></td>';
     } else {
-      h += '<td title="Size available at the current best price for your side, live from the Polymarket order book">' + fmtLiquidity(b) + '</td>';
+      h += '<td title="Size available at the current best price for your side, live from the bookmaker">' + fmtLiquidity(b) + '</td>';
       h += '<td>' + fmtDate(b.match_date) + '</td>';
       h += '<td>' + fmtDate(b.detected_at) + '</td>';
     }
