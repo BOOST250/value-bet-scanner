@@ -73,11 +73,9 @@ def grade_ml(home_score: int, away_score: int, bet_side: str) -> str:
 
 def grade_spread(home_score: int, away_score: int, bet_side: str, hdp: float) -> str:
     if bet_side == "home":
-        adjusted = home_score + hdp
-        diff = adjusted - away_score
+        diff = (home_score + hdp) - away_score
     else:
-        adjusted = away_score - hdp
-        diff = adjusted - home_score
+        diff = (away_score + hdp) - home_score
     if diff > 0:
         return "won"
     if diff == 0:
@@ -143,8 +141,9 @@ def grade_bets(conn) -> None:
             if not event:
                 continue
             scores = event.get("scores", {})
-            hs = scores.get("home")
-            aws = scores.get("away")
+            ft = scores.get("periods", {}).get("ft", {})
+            hs = ft.get("home") if ft else scores.get("home")
+            aws = ft.get("away") if ft else scores.get("away")
             if hs is None or aws is None:
                 continue
 
