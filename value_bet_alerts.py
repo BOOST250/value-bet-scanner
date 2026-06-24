@@ -92,7 +92,7 @@ def grade_totals(home_score: int, away_score: int, bet_side: str, hdp: float) ->
     return "push"
 
 
-def grade_bet_row(row, home_score: int, away_score: int) -> str:
+def grade_bet_row(row, home_score: int, away_score: int, ht_score: tuple[int, int] | None = None) -> str:
     market = row["market"]
     side = row["bet_side"]
     if market in ("ML", "1X2", "Moneyline"):
@@ -101,6 +101,10 @@ def grade_bet_row(row, home_score: int, away_score: int) -> str:
         return grade_spread(home_score, away_score, side, row["hdp"] or 0)
     if market in ("Totals", "Totals (Games)", "Total Maps"):
         return grade_totals(home_score, away_score, side, row["hdp"] or 0)
+    if market == "Totals HT":
+        if ht_score is None:
+            return "void"
+        return grade_totals(ht_score[0], ht_score[1], side, row["hdp"] or 0)
     return "void"
 
 
@@ -148,7 +152,10 @@ def grade_bets(conn) -> None:
             if hs is None or aws is None:
                 continue
 
-            result = grade_bet_row(row, int(hs), int(aws))
+            ht = periods.get("p1")
+            ht_score = (ht["home"], ht["away"]) if ht and ht.get("home") is not None and ht.get("away") is not None else None
+
+            result = grade_bet_row(row, int(hs), int(aws), ht_score)
             database.execute(
                 conn,
                 "UPDATE bets SET status=?, home_score=?, away_score=?, graded_at=? WHERE id=?",
