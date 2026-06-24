@@ -297,33 +297,105 @@ def index():
     return INDEX_HTML
 
 
-@app.route("/api/live")
-def api_live():
+def apply_filters(bets: list) -> list:
     sport = request.args.get("sport", "")
     bookmaker = request.args.get("bookmaker", "")
-    conn = database.get_conn()
-    bets = database.fetchall(conn, "SELECT * FROM bets WHERE status='pending' ORDER BY detected_at DESC")
-    database.close(conn)
+    market = request.args.get("market", "")
+    odds_min = request.args.get("odds_min", "")
+    odds_max = request.args.get("odds_max", "")
+    ev_min = request.args.get("ev_min", "")
     if sport:
         bets = [b for b in bets if b["sport"] == sport]
     if bookmaker:
         bets = [b for b in bets if b["bookmaker"] == bookmaker]
+    if market:
+        bets = [b for b in bets if b["market"] == market]
+    if odds_min:
+        bets = [b for b in bets if b["odds"] is not None and b["odds"] >= float(odds_min)]
+    if odds_max:
+        bets = [b for b in bets if b["odds"] is not None and b["odds"] <= float(odds_max)]
+    if ev_min:
+        bets = [b for b in bets if b["expected_value"] is not None and (b["expected_value"] - 100) >= float(ev_min)]
+    return bets
+
+
+@app.route("/api/live")
+def api_live():
+    conn = database.get_conn()
+    bets = database.fetchall(conn, "SELECT * FROM bets WHERE status='pending' ORDER BY detected_at DESC")
+    database.close(conn)
+    bets = apply_filters(bets)
     attach_liquidity(bets)
     return jsonify(bets)
 
 
 @app.route("/api/results")
 def api_results():
-    sport = request.args.get("sport", "")
-    bookmaker = request.args.get("bookmaker", "")
     conn = database.get_conn()
     bets = database.fetchall(conn, "SELECT * FROM bets WHERE status IN ('won','lost','push','void') ORDER BY graded_at DESC")
     database.close(conn)
-    if sport:
-        bets = [b for b in bets if b["sport"] == sport]
-    if bookmaker:
-        bets = [b for b in bets if b["bookmaker"] == bookmaker]
+    bets = apply_filters(bets)
     return jsonify(bets)
+
+
+@app.route("/api/track", methods=["POST"])
+def api_track():
+    data = request.get_json(force=True) or {}
+    bet_id = data.get("id")
+    if not bet_id:
+        return jsonify({"error": "missing id"}), 400
+    conn = database.get_conn()
+    database.execute(conn, "UPDATE bets SET tracked=? WHERE id=?", (bool(data.get("tracked")), bet_id))
+    database.commit(conn)
+    database.close(conn)
+    return jsonify({"ok": True})
+
+
+@app.route("/api/tracker")
+def api_tracker():
+    conn = database.get_conn()
+    bets = database.fetchall(conn, "SELECT * FROM bets WHERE tracked ORDER BY detected_at DESC")
+    database.close(conn)
+
+    settled = sorted(
+        (b for b in bets if b["status"] in ("won", "lost", "push")),
+        key=lambda b: b["graded_at"] or "",
+    )
+
+    def profit_of(b):
+        if b["status"] == "won":
+            return b["odds"] - 1
+        if b["status"] == "lost":
+            return -1.0
+        return 0.0
+
+    daily: dict[str, float] = {}
+    cumulative = []
+    running = 0.0
+    for b in settled:
+        p = profit_of(b)
+        running += p
+        date = (b["graded_at"] or "")[:10]
+        daily[date] = round(daily.get(date, 0.0) + p, 2)
+        cumulative.append({"date": b["graded_at"], "profit": round(running, 2)})
+
+    wins = sum(1 for b in settled if b["status"] == "won")
+    losses = sum(1 for b in settled if b["status"] == "lost")
+    n = wins + losses
+    profit = sum(profit_of(b) for b in settled if b["status"] in ("won", "lost"))
+
+    return jsonify({
+        "bets": bets,
+        "daily": daily,
+        "cumulative": cumulative,
+        "total": len(bets),
+        "pending": sum(1 for b in bets if b["status"] == "pending"),
+        "won": wins,
+        "lost": losses,
+        "win_rate": round(wins / n * 100, 1) if n else 0,
+        "roi": round(profit / n * 100, 1) if n else 0,
+        "profit_units": round(profit, 2),
+    })
 
 
 # Polymarket charges takers 3% on sports markets; Kalshi charges takers 7% flat.
@@ -536,6 +608,55 @@ INDEX_HTML = """<!DOCTYPE html>
   .bucket-table tr.low-sample { opacity:.55; }
   .sample-badge { font-size:9px; text-transform:uppercase; letter-spacing:.5px; color:var(--dim); border:1px solid var(--border); border-radius:4px; padding:1px 5px; margin-left:6px; cursor:help; }
 
+  .filter-toggle-btn {
+    background:var(--card); color:var(--text); border:1px solid var(--border);
+    border-radius:6px; padding:6px 14px; font-size:13px; cursor:pointer; font-weight:600;
+  }
+  .filter-toggle-btn:hover { border-color:var(--blue); }
+  .filter-toggle-btn.active { border-color:var(--blue); color:var(--blue); }
+  .filters-extra {
+    padding:0 32px 12px; display:none; flex-wrap:wrap; gap:10px; align-items:center;
+  }
+  .filters-extra.open { display:flex; }
+  .filters-extra input {
+    background:var(--card); color:var(--text); border:1px solid var(--border);
+    border-radius:6px; padding:6px 10px; font-size:13px; width:90px;
+  }
+  .filters-extra input:focus, .filters select:focus { outline:none; border-color:var(--blue); }
+  .filters-extra label { font-size:12px; color:var(--dim); display:flex; align-items:center; gap:6px; }
+  .clear-filters-btn {
+    background:none; color:var(--dim); border:1px solid var(--border); border-radius:6px;
+    padding:6px 12px; font-size:12px; cursor:pointer;
+  }
+  .clear-filters-btn:hover { color:var(--text); border-color:var(--red); }
+
+  .track-btn {
+    background:none; border:1px solid var(--border); border-radius:6px; cursor:pointer;
+    padding:4px 8px; font-size:14px; line-height:1; color:var(--dim); margin-right:6px;
+  }
+  .track-btn:hover { border-color:var(--yellow); }
+  .track-btn.tracked { color:var(--yellow); border-color:var(--yellow); background:rgba(234,179,8,.1); }
+
+  .tracker-layout { display:grid; grid-template-columns:1fr 1fr; gap:16px; margin-top:16px; }
+  .tracker-card { background:var(--card); border:1px solid var(--border); border-radius:10px; padding:16px; }
+  .tracker-card h3 { font-size:14px; margin-bottom:12px; color:var(--dim); font-weight:600; text-transform:uppercase; letter-spacing:.5px; }
+
+  .cal-nav { display:flex; justify-content:space-between; align-items:center; margin-bottom:10px; }
+  .cal-nav button { background:none; border:1px solid var(--border); border-radius:6px; color:var(--text); cursor:pointer; padding:4px 10px; }
+  .cal-nav button:hover { border-color:var(--blue); }
+  .cal-month-label { font-size:13px; font-weight:600; }
+  .cal-grid { display:grid; grid-template-columns:repeat(7,1fr); gap:4px; }
+  .cal-dow { font-size:10px; color:var(--dim); text-align:center; padding-bottom:4px; text-transform:uppercase; }
+  .cal-day {
+    aspect-ratio:1; border-radius:6px; font-size:11px; display:flex; align-items:center;
+    justify-content:center; border:1px solid var(--border); position:relative; cursor:default;
+  }
+  .cal-day.empty { border:none; }
+  .cal-day .num { position:absolute; top:3px; left:5px; font-size:9px; color:var(--dim); }
+  .cal-day[title]:hover { border-color:var(--text); }
+
+  .empty-tracker { text-align:center; padding:40px; color:var(--dim); font-size:13px; }
+
   .empty { text-align:center; padding:60px; color:var(--dim); }
 
   @media (max-width:768px) {
@@ -559,17 +680,27 @@ INDEX_HTML = """<!DOCTYPE html>
   <div class="tab active" data-tab="live">Live Bets</div>
   <div class="tab" data-tab="results">Results</div>
   <div class="tab" data-tab="breakdown">Breakdown</div>
+  <div class="tab" data-tab="tracker">Tracker</div>
 </div>
 
 <div class="filters">
   <select id="filter-sport"><option value="">All Sports</option></select>
   <select id="filter-bookmaker"><option value="">All Bookmakers</option></select>
+  <button class="filter-toggle-btn" id="filter-toggle-btn">Filters</button>
+  <button class="clear-filters-btn" id="clear-filters-btn" style="display:none">Clear filters</button>
+</div>
+<div class="filters-extra" id="filters-extra">
+  <select id="filter-market"><option value="">All Markets</option></select>
+  <label>Min odds <input type="number" step="0.01" id="filter-odds-min" placeholder="1.00"></label>
+  <label>Max odds <input type="number" step="0.01" id="filter-odds-max" placeholder="10.0"></label>
+  <label>Min EV % <input type="number" step="0.1" id="filter-ev-min" placeholder="0"></label>
 </div>
 
 <div class="content">
   <div id="tab-live"></div>
   <div id="tab-results" style="display:none"></div>
   <div id="tab-breakdown" style="display:none"></div>
+  <div id="tab-tracker" style="display:none"></div>
 </div>
 
 <script>
@@ -583,21 +714,51 @@ document.querySelectorAll('.tab').forEach(t => {
     currentTab = t.dataset.tab;
     document.querySelectorAll('[id^="tab-"]').forEach(x => x.style.display = 'none');
     document.getElementById('tab-' + currentTab).style.display = '';
+    const showFilters = currentTab === 'live' || currentTab === 'results';
+    document.querySelector('.filters').style.display = showFilters ? '' : 'none';
+    document.getElementById('filters-extra').style.display = showFilters && filtersOpen ? 'flex' : 'none';
     refresh();
   });
 });
 
+let filtersOpen = false;
+document.getElementById('filter-toggle-btn').addEventListener('click', () => {
+  filtersOpen = !filtersOpen;
+  document.getElementById('filter-toggle-btn').classList.toggle('active', filtersOpen);
+  document.getElementById('filters-extra').classList.toggle('open', filtersOpen);
+});
+
+document.getElementById('clear-filters-btn').addEventListener('click', () => {
+  document.getElementById('filter-sport').value = '';
+  document.getElementById('filter-bookmaker').value = '';
+  document.getElementById('filter-market').value = '';
+  document.getElementById('filter-odds-min').value = '';
+  document.getElementById('filter-odds-max').value = '';
+  document.getElementById('filter-ev-min').value = '';
+  refresh();
+});
+
 function qs() {
-  const s = document.getElementById('filter-sport').value;
-  const b = document.getElementById('filter-bookmaker').value;
   const p = new URLSearchParams();
-  if (s) p.set('sport', s);
-  if (b) p.set('bookmaker', b);
+  const sport = document.getElementById('filter-sport').value;
+  const bookmaker = document.getElementById('filter-bookmaker').value;
+  const market = document.getElementById('filter-market').value;
+  const oddsMin = document.getElementById('filter-odds-min').value;
+  const oddsMax = document.getElementById('filter-odds-max').value;
+  const evMin = document.getElementById('filter-ev-min').value;
+  if (sport) p.set('sport', sport);
+  if (bookmaker) p.set('bookmaker', bookmaker);
+  if (market) p.set('market', market);
+  if (oddsMin) p.set('odds_min', oddsMin);
+  if (oddsMax) p.set('odds_max', oddsMax);
+  if (evMin) p.set('ev_min', evMin);
+  document.getElementById('clear-filters-btn').style.display = p.toString() ? '' : 'none';
   return p.toString() ? '?' + p.toString() : '';
 }
 
-document.getElementById('filter-sport').addEventListener('change', refresh);
-document.getElementById('filter-bookmaker').addEventListener('change', refresh);
+['filter-sport', 'filter-bookmaker', 'filter-market', 'filter-odds-min', 'filter-odds-max', 'filter-ev-min'].forEach(id => {
+  document.getElementById(id).addEventListener('change', refresh);
+});
 
 function fmtEv(v) { return '+' + (v - 100).toFixed(1) + '%'; }
 function fmtOdds(v) { return v ? parseFloat(v).toFixed(2) : '-'; }
@@ -660,15 +821,37 @@ function fmtLiquidity(b) {
   return '$' + Math.round(b.liquidity).toLocaleString() + (cents != null ? ' @ ' + cents + '¢' : '');
 }
 
+async function toggleTrack(id, currentlyTracked) {
+  await fetch('/api/track', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({id: id, tracked: !currentlyTracked}),
+  });
+  refresh();
+}
+
+document.addEventListener('click', (e) => {
+  const btn = e.target.closest('.track-btn');
+  if (btn) toggleTrack(btn.dataset.id, btn.dataset.tracked === '1');
+});
+
+function trackBtn(b) {
+  const tracked = !!b.tracked;
+  return '<button class="track-btn' + (tracked ? ' tracked' : '') + '" title="' +
+    (tracked ? 'Tracked -- click to untrack' : 'Track this bet') + '" data-id="' + b.id + '" data-tracked="' + (tracked ? '1' : '0') + '">' +
+    (tracked ? '★' : '☆') + '</button>';
+}
+
 function renderTable(bets, showResult) {
   if (!bets.length) return '<div class="empty">No bets found</div>';
   let h = '<table><thead><tr>' +
-    '<th>Match</th><th>Sport</th><th>Bookmaker</th><th>Side</th><th>Market</th><th>Odds</th><th>EV</th>' +
+    '<th></th><th>Match</th><th>Sport</th><th>Bookmaker</th><th>Side</th><th>Market</th><th>Odds</th><th>EV</th>' +
     (showResult ? '<th>Score</th><th>Result</th>' : '<th>Liquidity</th><th>Kick-off</th><th>Detected</th>') +
     '<th></th>' +
     '</tr></thead><tbody>';
   for (const b of bets) {
     h += '<tr>';
+    h += '<td>' + trackBtn(b) + '</td>';
     h += '<td><strong>' + (b.home||'?') + '</strong> vs <strong>' + (b.away||'?') + '</strong></td>';
     h += '<td>' + (b.sport||'-') + '</td>';
     h += '<td>' + (b.bookmaker||'-') + '</td>';
@@ -742,11 +925,9 @@ function renderBreakdown(s) {
 
 async function refresh() {
   try {
-    const [sRes, lRes, rRes] = await Promise.all([
-      fetch('/api/stats'),
-      fetch('/api/live' + qs()),
-      fetch('/api/results' + qs()),
-    ]);
+    const tasks = [fetch('/api/stats'), fetch('/api/live' + qs()), fetch('/api/results' + qs())];
+    if (currentTab === 'tracker') tasks.push(refreshTracker());
+    const [sRes, lRes, rRes] = await Promise.all(tasks);
     const s = await sRes.json();
     const live = await lRes.json();
     const results = await rRes.json();
@@ -757,10 +938,11 @@ async function refresh() {
     document.getElementById('tab-breakdown').innerHTML = renderBreakdown(s);
 
     // populate filter dropdowns
-    const sports = new Set(), bookmakers = new Set();
-    [...live, ...results].forEach(b => { if(b.sport) sports.add(b.sport); if(b.bookmaker) bookmakers.add(b.bookmaker); });
+    const sports = new Set(), bookmakers = new Set(), markets = new Set();
+    [...live, ...results].forEach(b => { if(b.sport) sports.add(b.sport); if(b.bookmaker) bookmakers.add(b.bookmaker); if(b.market) markets.add(b.market); });
     updateSelect('filter-sport', [...sports].sort());
     updateSelect('filter-bookmaker', [...bookmakers].sort());
+    updateSelect('filter-market', [...markets].sort());
 
     document.getElementById('status').textContent = 'Last updated: ' + new Date().toLocaleTimeString();
   } catch(e) {
@@ -768,12 +950,115 @@ async function refresh() {
   }
 }
 
+const SELECT_LABELS = {'filter-sport': 'All Sports', 'filter-bookmaker': 'All Bookmakers', 'filter-market': 'All Markets'};
+
 function updateSelect(id, options) {
   const sel = document.getElementById(id);
   const cur = sel.value;
-  const label = id === 'filter-sport' ? 'All Sports' : 'All Bookmakers';
+  const label = SELECT_LABELS[id] || '';
   const html = '<option value="">' + label + '</option>' + options.map(o => '<option value="'+o+'"' + (o===cur?' selected':'') + '>'+o+'</option>').join('');
   if (sel.innerHTML !== html) sel.innerHTML = html;
+}
+
+function renderTrackerStats(t) {
+  const n = t.won + t.lost;
+  const cards = [
+    { value: t.total, label: 'Tracked Bets', cls: '' },
+    { value: t.pending, label: 'Pending', cls: 'blue' },
+    { value: t.won, label: 'Won', cls: 'green' },
+    { value: t.lost, label: 'Lost', cls: 'red' },
+    { value: n ? t.win_rate + '%' : '-', label: 'Win Rate', cls: t.win_rate >= 50 ? 'green' : 'red' },
+    { value: n ? (t.roi >= 0 ? '+' : '') + t.roi + '%' : '-', label: 'ROI', cls: t.roi >= 0 ? 'green' : 'red' },
+    { value: n ? (t.profit_units >= 0 ? '+' : '') + t.profit_units.toFixed(1) + 'u' : '-', label: 'Profit', cls: t.profit_units >= 0 ? 'green' : 'red' },
+  ];
+  return cards.map(c =>
+    '<div class="stat-card"><div class="value ' + c.cls + '">' + c.value + '</div><div class="label">' + c.label + '</div></div>'
+  ).join('');
+}
+
+let calOffset = 0; // months back from current month
+
+function renderCalendar(daily) {
+  const now = new Date();
+  const view = new Date(now.getFullYear(), now.getMonth() + calOffset, 1);
+  const year = view.getFullYear(), month = view.getMonth();
+  const monthLabel = view.toLocaleDateString('en-US', {month:'long', year:'numeric'});
+  const firstDow = new Date(year, month, 1).getDay();
+  const daysInMonth = new Date(year, month+1, 0).getDate();
+
+  let h = '<div class="cal-nav"><button id="cal-prev">‹</button><div class="cal-month-label">' + monthLabel + '</div><button id="cal-next">›</button></div>';
+  h += '<div class="cal-grid">';
+  ['S','M','T','W','T','F','S'].forEach(d => h += '<div class="cal-dow">' + d + '</div>');
+  for (let i=0; i<firstDow; i++) h += '<div class="cal-day empty"></div>';
+  for (let d=1; d<=daysInMonth; d++) {
+    const dateStr = year + '-' + String(month+1).padStart(2,'0') + '-' + String(d).padStart(2,'0');
+    const profit = daily[dateStr];
+    let bg = 'transparent', color = 'var(--dim)', title = dateStr + ': no settled bets';
+    if (profit !== undefined) {
+      const intensity = Math.min(Math.abs(profit) / 5, 1);
+      bg = profit >= 0 ? 'rgba(34,197,94,' + (0.15 + intensity*0.5) + ')' : 'rgba(239,68,68,' + (0.15 + intensity*0.5) + ')';
+      color = profit >= 0 ? 'var(--green)' : 'var(--red)';
+      title = dateStr + ': ' + (profit>=0?'+':'') + profit.toFixed(1) + 'u';
+    }
+    h += '<div class="cal-day" style="background:' + bg + ';color:' + color + '" title="' + title + '"><span class="num">' + d + '</span>' +
+      (profit !== undefined ? (profit>=0?'+':'') + profit.toFixed(1) : '') + '</div>';
+  }
+  h += '</div>';
+  return h;
+}
+
+function renderChart(cumulative) {
+  if (!cumulative.length) return '<div class="empty-tracker">No settled tracked bets yet</div>';
+  const w = 480, ht = 180, pad = 24;
+  const profits = cumulative.map(c => c.profit);
+  const min = Math.min(0, ...profits), max = Math.max(0, ...profits);
+  const range = (max - min) || 1;
+  const x = i => pad + (i / Math.max(cumulative.length - 1, 1)) * (w - pad*2);
+  const y = v => ht - pad - ((v - min) / range) * (ht - pad*2);
+  const points = cumulative.map((c,i) => x(i) + ',' + y(c.profit)).join(' ');
+  const zeroY = y(0);
+  const last = profits[profits.length-1];
+  const lineColor = last >= 0 ? 'var(--green)' : 'var(--red)';
+  return '<svg viewBox="0 0 ' + w + ' ' + ht + '" style="width:100%;height:200px">' +
+    '<line x1="' + pad + '" y1="' + zeroY + '" x2="' + (w-pad) + '" y2="' + zeroY + '" stroke="var(--border)" stroke-dasharray="3,3"/>' +
+    '<polyline points="' + points + '" fill="none" stroke="' + lineColor + '" stroke-width="2"/>' +
+    '<circle cx="' + x(cumulative.length-1) + '" cy="' + y(last) + '" r="3" fill="' + lineColor + '"/>' +
+    '</svg>';
+}
+
+function renderTrackerList(bets) {
+  if (!bets.length) return '<div class="empty-tracker">No tracked bets yet -- click the ☆ on any bet in Live Bets or Results to start tracking it.</div>';
+  let h = '<table><thead><tr><th></th><th>Match</th><th>Sport</th><th>Bookmaker</th><th>Side</th><th>Market</th><th>Odds</th><th>Score</th><th>Status</th></tr></thead><tbody>';
+  for (const b of bets) {
+    h += '<tr>';
+    h += '<td>' + trackBtn(b) + '</td>';
+    h += '<td><strong>' + (b.home||'?') + '</strong> vs <strong>' + (b.away||'?') + '</strong></td>';
+    h += '<td>' + (b.sport||'-') + '</td>';
+    h += '<td>' + (b.bookmaker||'-') + '</td>';
+    h += '<td>' + sideLabel(b) + '</td>';
+    h += '<td>' + (b.market||'-') + (b.hdp ? ' ('+b.hdp+')' : '') + '</td>';
+    h += '<td>' + fmtOdds(b.odds) + '</td>';
+    h += '<td>' + (b.home_score != null ? b.home_score + '-' + b.away_score : '-') + '</td>';
+    h += '<td><span class="badge ' + b.status + '">' + b.status.toUpperCase() + '</span></td>';
+    h += '</tr>';
+  }
+  h += '</tbody></table>';
+  return h;
+}
+
+async function refreshTracker() {
+  const res = await fetch('/api/tracker');
+  const t = await res.json();
+  let h = '<div class="stats-row" style="padding:0 0 16px">' + renderTrackerStats(t) + '</div>';
+  h += '<div class="tracker-layout">';
+  h += '<div class="tracker-card"><h3>Daily P&L</h3><div id="cal-container">' + renderCalendar(t.daily) + '</div></div>';
+  h += '<div class="tracker-card"><h3>Cumulative Profit</h3>' + renderChart(t.cumulative) + '</div>';
+  h += '</div>';
+  h += '<div class="tracker-card" style="margin-top:16px"><h3>Tracked Bets</h3>' + renderTrackerList(t.bets) + '</div>';
+  document.getElementById('tab-tracker').innerHTML = h;
+
+  document.getElementById('cal-prev').addEventListener('click', () => { calOffset--; document.getElementById('cal-container').innerHTML = renderCalendar(t.daily); });
+  document.getElementById('cal-next').addEventListener('click', () => { calOffset++; document.getElementById('cal-container').innerHTML = renderCalendar(t.daily); });
 }
 
 refresh();

@@ -102,7 +102,8 @@ CREATE_TABLE_SQLITE = """
         home_score    INTEGER,
         away_score    INTEGER,
         graded_at     TEXT,
-        event_url     TEXT
+        event_url     TEXT,
+        tracked       INTEGER DEFAULT 0
     )
 """
 
@@ -126,7 +127,8 @@ CREATE_TABLE_PG = """
         home_score    INTEGER,
         away_score    INTEGER,
         graded_at     TEXT,
-        event_url     TEXT
+        event_url     TEXT,
+        tracked       BOOLEAN DEFAULT FALSE
     )
 """
 
@@ -136,17 +138,20 @@ def init_db():
     if DATABASE_URL:
         cur = conn.cursor()
         cur.execute(CREATE_TABLE_PG)
-        try:
-            cur.execute("SET statement_timeout = '5000'")
-            cur.execute("ALTER TABLE bets ADD COLUMN IF NOT EXISTS event_url TEXT")
-        except Exception as e:
-            print(f"  Warning: could not add event_url column: {e}")
-            conn.rollback()
+        for col, coltype in [("event_url", "TEXT"), ("tracked", "BOOLEAN DEFAULT FALSE")]:
+            try:
+                cur.execute("SET statement_timeout = '5000'")
+                cur.execute(f"ALTER TABLE bets ADD COLUMN IF NOT EXISTS {col} {coltype}")
+            except Exception as e:
+                print(f"  Warning: could not add {col} column: {e}")
+                conn.rollback()
         cur.close()
     else:
         conn.execute(CREATE_TABLE_SQLITE)
         existing = {row[1] for row in conn.execute("PRAGMA table_info(bets)").fetchall()}
         if "event_url" not in existing:
             conn.execute("ALTER TABLE bets ADD COLUMN event_url TEXT")
+        if "tracked" not in existing:
+            conn.execute("ALTER TABLE bets ADD COLUMN tracked INTEGER DEFAULT 0")
     conn.commit()
     return conn
