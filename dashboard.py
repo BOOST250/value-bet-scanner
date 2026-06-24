@@ -48,6 +48,20 @@ def api_results():
     return jsonify(bets)
 
 
+# Polymarket charges takers 3% on sports markets; Kalshi charges takers 7% flat.
+# Both formulas are fee = feeRate * C * p * (1-p), where C = contracts and p = contract
+# price (~implied probability, p = 1/odds). As a fraction of stake the per-contract terms
+# collapse to feeRate * (1 - p) -- i.e. fee bites hardest on long-odds underdog bets, not
+# coin-flip bets, since longshots require buying many more cheap contracts per dollar staked.
+FEE_RATE_SQL = "CASE WHEN bookmaker='Polymarket' THEN 0.03 WHEN bookmaker='Kalshi' THEN 0.07 ELSE 0 END"
+FEE_SQL = f"(({FEE_RATE_SQL}) * (1 - 1.0/odds))"
+NET_PROFIT_SQL = f"""CASE
+    WHEN status='won' THEN (odds - 1) - {FEE_SQL}
+    WHEN status='lost' THEN -1 - {FEE_SQL}
+    WHEN status='push' THEN -{FEE_SQL}
+  END"""
+
+
 @app.route("/api/stats")
 def api_stats():
     conn = database.get_conn()
@@ -68,12 +82,18 @@ def api_stats():
         )
     roi = ((profit - losses) / settled * 100) if settled else 0
 
-    BREAKDOWN_COLS = """COUNT(*) total,
+    net_profit = database.fetchone(
+        conn, f"SELECT COALESCE(SUM({NET_PROFIT_SQL}), 0) net FROM bets WHERE status IN ('won','lost','push')"
+    )["net"]
+    net_roi = (net_profit / settled * 100) if settled else 0
+
+    BREAKDOWN_COLS = f"""COUNT(*) total,
                COALESCE(SUM(CASE WHEN status='won' THEN 1 END), 0) w,
                COALESCE(SUM(CASE WHEN status='lost' THEN 1 END), 0) l,
                COALESCE(SUM(CASE WHEN status='pending' THEN 1 END), 0) p,
                COALESCE(SUM(CASE WHEN status='won' THEN odds - 1 END), 0) profit_w,
-               COALESCE(SUM(CASE WHEN status='lost' THEN 1 END), 0) loss_units"""
+               COALESCE(SUM(CASE WHEN status='lost' THEN 1 END), 0) loss_units,
+               COALESCE(SUM({NET_PROFIT_SQL}), 0) net_profit"""
 
     by_bookmaker = database.fetchall(conn, f"SELECT bookmaker, {BREAKDOWN_COLS} FROM bets GROUP BY bookmaker")
     by_sport = database.fetchall(conn, f"SELECT sport, {BREAKDOWN_COLS} FROM bets GROUP BY sport ORDER BY total DESC")
@@ -122,6 +142,8 @@ def api_stats():
         "win_rate": round(wins / settled * 100, 1) if settled else 0,
         "roi": round(roi, 1),
         "profit_units": round(profit - losses, 2),
+        "net_roi": round(net_roi, 1),
+        "net_profit_units": round(net_profit, 2),
         "by_bookmaker": by_bookmaker,
         "by_sport": by_sport,
         "by_market": by_market,
@@ -316,8 +338,10 @@ function renderStats(s) {
     { value: s.won, label: 'Won', cls: 'green' },
     { value: s.lost, label: 'Lost', cls: 'red' },
     { value: s.settled ? s.win_rate + '%' : '-', label: 'Win Rate', cls: s.win_rate >= 50 ? 'green' : 'red' },
-    { value: s.settled ? (s.roi >= 0 ? '+' : '') + s.roi + '%' : '-', label: 'ROI', cls: s.roi >= 0 ? 'green' : 'red' },
-    { value: s.settled ? (s.profit_units >= 0 ? '+' : '') + s.profit_units.toFixed(1) + 'u' : '-', label: 'Profit', cls: s.profit_units >= 0 ? 'green' : 'red' },
+    { value: s.settled ? (s.roi >= 0 ? '+' : '') + s.roi + '%' : '-', label: 'ROI (gross)', cls: s.roi >= 0 ? 'green' : 'red' },
+    { value: s.settled ? (s.profit_units >= 0 ? '+' : '') + s.profit_units.toFixed(1) + 'u' : '-', label: 'Profit (gross)', cls: s.profit_units >= 0 ? 'green' : 'red' },
+    { value: s.settled ? (s.net_roi >= 0 ? '+' : '') + s.net_roi + '%' : '-', label: 'ROI (after fees)', cls: s.net_roi >= 0 ? 'green' : 'red' },
+    { value: s.settled ? (s.net_profit_units >= 0 ? '+' : '') + s.net_profit_units.toFixed(1) + 'u' : '-', label: 'Profit (after fees)', cls: s.net_profit_units >= 0 ? 'green' : 'red' },
   ];
   document.getElementById('stats-row').innerHTML = cards.map(c =>
     '<div class="stat-card"><div class="value ' + c.cls + '">' + c.value + '</div><div class="label">' + c.label + '</div></div>'
@@ -383,7 +407,7 @@ const MIN_SAMPLE_SIZE = 30;
 
 function bucketTable(title, rows, nameKey) {
   let h = '<div class="breakdown-card"><h3>' + title + '</h3>';
-  h += '<table class="bucket-table"><thead><tr><th>' + (nameKey === 'label' ? 'Range' : nameKey.charAt(0).toUpperCase()+nameKey.slice(1)) + '</th><th>Total</th><th>W</th><th>L</th><th>Pending</th><th>Win%</th><th>ROI</th><th>Profit</th></tr></thead><tbody>';
+  h += '<table class="bucket-table"><thead><tr><th>' + (nameKey === 'label' ? 'Range' : nameKey.charAt(0).toUpperCase()+nameKey.slice(1)) + '</th><th>Total</th><th>W</th><th>L</th><th>Pending</th><th>Win%</th><th>ROI</th><th>Profit</th><th>Net ROI</th><th>Net Profit</th></tr></thead><tbody>';
   for (const r of rows) {
     if (r.total === 0) continue;
     const st = r.w + r.l;
@@ -391,9 +415,13 @@ function bucketTable(title, rows, nameKey) {
     const wr = st ? (r.w/st*100).toFixed(1)+'%' : '-';
     const profit = st ? ((r.profit_w || 0) - r.l) : null;
     const roi = st ? (profit / st * 100).toFixed(1) : '-';
+    const netProfit = st ? (r.net_profit || 0) : null;
+    const netRoi = st ? (netProfit / st * 100).toFixed(1) : '-';
     const roiCls = roi !== '-' ? (parseFloat(roi) >= 0 ? 'green' : 'red') : '';
+    const netRoiCls = netRoi !== '-' ? (parseFloat(netRoi) >= 0 ? 'green' : 'red') : '';
     const wrCls = wr !== '-' ? (parseFloat(wr) >= 50 ? 'green' : 'red') : '';
     const profitCls = profit !== null ? (profit >= 0 ? 'green' : 'red') : '';
+    const netProfitCls = netProfit !== null ? (netProfit >= 0 ? 'green' : 'red') : '';
     h += '<tr' + (lowSample ? ' class="low-sample"' : '') + '>';
     h += '<td><strong>' + r[nameKey] + '</strong>' + (lowSample ? ' <span class="sample-badge" title="Fewer than ' + MIN_SAMPLE_SIZE + ' settled bets — not statistically meaningful yet">low sample</span>' : '') + '</td>';
     h += '<td>' + r.total + '</td>';
@@ -403,6 +431,8 @@ function bucketTable(title, rows, nameKey) {
     h += '<td class="' + (lowSample ? '' : wrCls) + '">' + wr + '</td>';
     h += '<td class="' + (lowSample ? '' : roiCls) + '">' + (roi !== '-' ? (parseFloat(roi)>=0?'+':'') + roi + '%' : '-') + '</td>';
     h += '<td class="' + (lowSample ? '' : profitCls) + '">' + (profit !== null ? (profit>=0?'+':'') + profit.toFixed(1) + 'u' : '-') + '</td>';
+    h += '<td class="' + (lowSample ? '' : netRoiCls) + '">' + (netRoi !== '-' ? (parseFloat(netRoi)>=0?'+':'') + netRoi + '%' : '-') + '</td>';
+    h += '<td class="' + (lowSample ? '' : netProfitCls) + '">' + (netProfit !== null ? (netProfit>=0?'+':'') + netProfit.toFixed(1) + 'u' : '-') + '</td>';
     h += '</tr>';
   }
   h += '</tbody></table></div>';
