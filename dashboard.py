@@ -8,6 +8,7 @@ Then open http://localhost:5000
 
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 import requests
 from flask import Flask, jsonify, request
@@ -82,6 +83,18 @@ def _trailing_number(title: str | None) -> float | None:
 def attach_liquidity(bets: list) -> list:
     for b in bets:
         b["liquidity"] = None
+
+    slugs = {
+        b["event_url"].rstrip("/").rsplit("/", 1)[-1]
+        for b in bets
+        if b.get("bookmaker") == "Polymarket" and b.get("event_url")
+    }
+    uncached = [s for s in slugs if not (_EVENT_CACHE.get(s) and time.time() - _EVENT_CACHE[s][0] < _EVENT_CACHE_TTL)]
+    if uncached:
+        with ThreadPoolExecutor(max_workers=20) as pool:
+            pool.map(get_event_markets, uncached)
+
+    for b in bets:
         if b.get("bookmaker") != "Polymarket" or not b.get("event_url"):
             continue
         slug = b["event_url"].rstrip("/").rsplit("/", 1)[-1]
