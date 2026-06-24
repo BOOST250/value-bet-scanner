@@ -345,6 +345,10 @@ def main():
             run_once(conn, seen_ids, bookmakers, sport, do_grade=do_grade)
         except Exception as e:
             print(f"  Unexpected error: {e}")
+            try:
+                conn.rollback()
+            except Exception:
+                pass
         time.sleep(POLL_INTERVAL)
 
 
