@@ -141,9 +141,10 @@ def grade_bets(conn) -> None:
             if not event:
                 continue
             scores = event.get("scores", {})
-            ft = scores.get("periods", {}).get("ft", {})
-            hs = ft.get("home") if ft else scores.get("home")
-            aws = ft.get("away") if ft else scores.get("away")
+            periods = scores.get("periods", {})
+            final = periods.get("ot") or periods.get("ft")
+            hs = final.get("home") if final else scores.get("home")
+            aws = final.get("away") if final else scores.get("away")
             if hs is None or aws is None:
                 continue
 
