@@ -57,11 +57,35 @@ def _trailing_number(title: str | None) -> float | None:
     return abs(float(m.group())) if m else None
 
 
-def _find_market(markets: list, market_name: str, hdp) -> dict | None:
+def _disambiguate_by_question(candidates: list, bet_side: str, hdp: float, home: str, away: str) -> dict | None:
+    """When multiple sub-markets share a title (e.g. a handicap split into two directional
+    markets), use the question text -- which names the favored team right next to its
+    signed line, e.g. "Vasilev (-1.5) vs Kopp (+1.5)" -- to find the one matching our side.
+    Requires the sign to sit immediately next to our team's name, not just appear anywhere
+    in the text, since both directional variants mention both players and both signs."""
+    team_tokens = _name_tokens(home if bet_side == "home" else away)
+    if not team_tokens:
+        return None
+    sign = "-" if hdp < 0 else "+"
+    number = f"{abs(float(hdp))}".rstrip("0").rstrip(".")
+    hits = []
+    for m in candidates:
+        q = (m.get("question") or "").lower().replace(" ", "")
+        if any(f"{tok}({sign}{number}" in q for tok in team_tokens):
+            hits.append(m)
+    return hits[0] if len(hits) == 1 else None
+
+
+def _find_market(markets: list, market_name: str, hdp, bet_side: str = "", home: str = "", away: str = "") -> dict | None:
     """Return the one sub-market matching our market+hdp, or None if zero/ambiguous matches."""
     if market_name in ("ML", "1X2", "Moneyline"):
         matches = [m for m in markets if not m.get("groupItemTitle")]
-    elif market_name in ("Spread", "Map Handicap") and hdp is not None:
+        if len(matches) == 1:
+            return matches[0]
+        winner_market = [m for m in markets if (m.get("groupItemTitle") or "").lower() == "match winner"]
+        return winner_market[0] if len(winner_market) == 1 else None
+
+    if market_name in ("Spread", "Map Handicap") and hdp is not None:
         target = abs(float(hdp))
         matches = [
             m for m in markets
@@ -69,7 +93,13 @@ def _find_market(markets: list, market_name: str, hdp) -> dict | None:
             and "inning" not in (m.get("groupItemTitle") or "").lower()
             and _trailing_number(m.get("groupItemTitle")) == target
         ]
-    elif market_name in ("Totals", "Totals (Games)", "Total Maps") and hdp is not None:
+        if len(matches) == 1:
+            return matches[0]
+        if len(matches) > 1:
+            return _disambiguate_by_question(matches, bet_side, float(hdp), home, away)
+        return None
+
+    if market_name in ("Totals", "Totals (Games)", "Total Maps") and hdp is not None:
         target = abs(float(hdp))
         matches = [
             m for m in markets
@@ -77,9 +107,9 @@ def _find_market(markets: list, market_name: str, hdp) -> dict | None:
             and "inning" not in (m.get("groupItemTitle") or "").lower()
             and _trailing_number(m.get("groupItemTitle")) == target
         ]
-    else:
-        matches = []
-    return matches[0] if len(matches) == 1 else None
+        return matches[0] if len(matches) == 1 else None
+
+    return None
 
 
 _STOPWORDS = {"the", "fc", "sc", "cf", "afc", "club"}
@@ -107,10 +137,11 @@ def _outcome_token(market: dict, market_name: str, bet_side: str, home: str, awa
 
     if market_name in ("Totals", "Totals (Games)", "Total Maps", "Totals HT"):
         lowered = [o.lower() for o in outcomes]
-        if "over" not in lowered or "under" not in lowered:
+        over_idx = [i for i, o in enumerate(lowered) if o.startswith("over")]
+        under_idx = [i for i, o in enumerate(lowered) if o.startswith("under")]
+        if len(over_idx) != 1 or len(under_idx) != 1:
             return None
-        wanted = "over" if bet_side == "home" else "under"
-        return token_ids[lowered.index(wanted)]
+        return token_ids[over_idx[0] if bet_side == "home" else under_idx[0]]
 
     target = _name_tokens(home if bet_side == "home" else away)
     if not target:
@@ -153,7 +184,7 @@ def attach_liquidity(bets: list) -> list:
         markets = get_event_markets(slug)
         if not markets:
             continue
-        market = _find_market(markets, b.get("market"), b.get("hdp"))
+        market = _find_market(markets, b.get("market"), b.get("hdp"), b.get("bet_side"), b.get("home"), b.get("away"))
         if not market:
             continue
         token = _outcome_token(market, b.get("market"), b.get("bet_side"), b.get("home"), b.get("away"))
