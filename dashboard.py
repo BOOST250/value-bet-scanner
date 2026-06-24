@@ -563,7 +563,7 @@ function renderTable(bets, showResult) {
       h += '<td>' + (b.home_score != null ? b.home_score + '-' + b.away_score : '-') + '</td>';
       h += '<td><span class="badge ' + b.status + '">' + b.status.toUpperCase() + '</span></td>';
     } else {
-      h += '<td title="Size available at the current best price for your side, live from Polymarket\'s order book">' + fmtLiquidity(b) + '</td>';
+      h += '<td title="Size available at the current best price for your side, live from the Polymarket order book">' + fmtLiquidity(b) + '</td>';
       h += '<td>' + fmtDate(b.match_date) + '</td>';
       h += '<td>' + fmtDate(b.detected_at) + '</td>';
     }
