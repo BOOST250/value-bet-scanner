@@ -164,7 +164,13 @@ def grade_bets(conn) -> None:
             ht = periods.get("p1")
             ht_score = (ht["home"], ht["away"]) if ht and ht.get("home") is not None and ht.get("away") is not None else None
 
-            result = grade_bet_row(row, int(hs), int(aws), ht_score)
+            # A 0-0 final score is impossible for a completed tennis match (minimum is
+            # 2-0 sets) -- it means the match was cancelled/walkover/never played, even
+            # though the API reports status="settled" with no separate flag for that.
+            if row["sport"] == "Tennis" and int(hs) == 0 and int(aws) == 0:
+                result = "void"
+            else:
+                result = grade_bet_row(row, int(hs), int(aws), ht_score)
             database.execute(
                 conn,
                 "UPDATE bets SET status=?, home_score=?, away_score=?, graded_at=? WHERE id=?",
