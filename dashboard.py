@@ -8,6 +8,7 @@ Then open http://localhost:5000
 
 import json
 import re
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 
@@ -174,6 +175,26 @@ def get_kalshi_markets(event_ticker: str) -> list | None:
     return data.get("markets", []) if data else None
 
 
+_kalshi_refresh_lock = threading.Lock()
+
+
+def _kick_off_kalshi_refresh(tickers: list) -> None:
+    """Fetch these tickers serially in a background thread, never blocking the caller.
+    Skips entirely if a previous sweep is still running so refreshes don't pile up."""
+    if not tickers or not _kalshi_refresh_lock.acquire(blocking=False):
+        return
+
+    def run():
+        try:
+            for t in tickers:
+                _KALSHI_LAST_TRY[t] = time.time()
+                get_kalshi_markets(t)
+        finally:
+            _kalshi_refresh_lock.release()
+
+    threading.Thread(target=run, daemon=True).start()
+
+
 def _kalshi_outcome_market(markets: list, bet_side: str, home: str, away: str) -> dict | None:
     """ML-only: each Kalshi market here is a separate binary 'Will X win?' contract, one
     per team, with no draw market in this set -- so a clean single-team-name match works."""
@@ -239,12 +260,13 @@ def attach_liquidity(bets: list) -> list:
         b["liquidity_price"] = price
 
     # Kalshi rate-limits on concurrency (~1 in-flight request per IP), not request volume --
-    # any parallelism here returns a wave of 429s. Fetch serially and cap how many tickers we
-    # fetch per call, always picking the least-recently-tried ones first, so a single request
-    # never blocks for the 15-20+ seconds a full serial sweep would take. The lookup loop below
-    # only reads whatever's already cached -- it never triggers a fetch itself -- so coverage
-    # rotates across distinct tickers over a few of the dashboard's 15s auto-refresh polls
-    # instead of always retrying the same first N and starving the rest.
+    # any parallelism here returns a wave of 429s -- and the Railway-to-Kalshi network path
+    # measured far slower in production than locally (one run took 36s for a 15-ticker serial
+    # sweep that took ~4s from a home connection). Rather than ever block the request on that
+    # unpredictable latency, kick off a background sweep (capped, oldest-tried-first, one at a
+    # time via a lock so refreshes don't stack) and only ever read whatever's already cached.
+    # Coverage fills in over a few of the dashboard's 15s auto-refresh polls instead of holding
+    # up any single one of them.
     KALSHI_FETCH_CAP = 15
     kalshi_bets = [b for b in bets if b.get("bookmaker") == "Kalshi" and b.get("market") == "ML" and b.get("event_url")]
     tickers = {b["event_url"].rstrip("/").rsplit("/", 1)[-1].upper() for b in kalshi_bets}
@@ -252,9 +274,7 @@ def attach_liquidity(bets: list) -> list:
         t for t in tickers if not (_KALSHI_CACHE.get(t) and time.time() - _KALSHI_CACHE[t][0] < _CACHE_TTL)
     ]
     uncached_tickers.sort(key=lambda t: _KALSHI_LAST_TRY.get(t, 0.0))
-    for t in uncached_tickers[:KALSHI_FETCH_CAP]:
-        _KALSHI_LAST_TRY[t] = time.time()
-        get_kalshi_markets(t)
+    _kick_off_kalshi_refresh(uncached_tickers[:KALSHI_FETCH_CAP])
 
     for b in kalshi_bets:
         ticker = b["event_url"].rstrip("/").rsplit("/", 1)[-1].upper()
