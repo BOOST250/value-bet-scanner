@@ -66,8 +66,9 @@ def log_bet(conn, bet: dict) -> None:
 
 def grade_ml(home_score: int, away_score: int, bet_side: str) -> str:
     if home_score == away_score:
-        return "push"
-    winner = "home" if home_score > away_score else "away"
+        winner = "draw"
+    else:
+        winner = "home" if home_score > away_score else "away"
     return "won" if bet_side == winner else "lost"
 
 
