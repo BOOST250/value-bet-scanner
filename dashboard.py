@@ -339,6 +339,16 @@ function eventUrl(b) {
   return 'https://www.google.com/search?q=' + encodeURIComponent((b.bookmaker||'') + ' ' + query);
 }
 
+const TOTALS_MARKETS = new Set(['Totals', 'Totals (Games)', 'Total Maps', 'Totals HT']);
+
+function sideLabel(b) {
+  if (TOTALS_MARKETS.has(b.market)) {
+    if (b.bet_side === 'home') return 'Over';
+    if (b.bet_side === 'away') return 'Under';
+  }
+  return b.bet_side || '-';
+}
+
 function renderTable(bets, showResult) {
   if (!bets.length) return '<div class="empty">No bets found</div>';
   let h = '<table><thead><tr>' +
@@ -351,7 +361,7 @@ function renderTable(bets, showResult) {
     h += '<td><strong>' + (b.home||'?') + '</strong> vs <strong>' + (b.away||'?') + '</strong></td>';
     h += '<td>' + (b.sport||'-') + '</td>';
     h += '<td>' + (b.bookmaker||'-') + '</td>';
-    h += '<td>' + (b.bet_side||'-') + '</td>';
+    h += '<td>' + sideLabel(b) + '</td>';
     h += '<td>' + (b.market||'-') + (b.hdp ? ' ('+b.hdp+')' : '') + '</td>';
     h += '<td>' + fmtOdds(b.odds) + '</td>';
     h += '<td class="ev-positive">' + fmtEv(b.expected_value) + '</td>';
