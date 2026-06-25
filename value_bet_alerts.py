@@ -18,7 +18,7 @@ GRADE_EVERY_N = 3    # grade settled bets every Nth cycle
 API_KEY = os.environ.get("ODDS_API_KEY", "")
 DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL", "")
 
-DEFAULT_BOOKMAKERS = ["Polymarket", "Kalshi"]
+DEFAULT_BOOKMAKERS = ["Polymarket", "TippmixPRO"]
 
 # ---------------------------------------------------------------------------
 # Database
