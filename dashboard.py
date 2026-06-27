@@ -792,9 +792,53 @@ function renderStats(s) {
 const BOOKMAKER_DOMAINS = {
   'Polymarket': 'polymarket.com',
   'Kalshi': 'kalshi.com',
+  'Stake': 'stake.com',
 };
 
+function slugify(s) {
+  return (s || '').toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+}
+
+// Stake's API-provided href is missing its category path (e.g. gives
+// stake.com/sports/{id}-{slug}/all instead of
+// stake.com/sports/tennis/wta/wimbledon-women-singles/{id}-{slug}), which makes it
+// slow/unreliable to land on directly. Reconstruct the full path best-effort from our
+// stored sport+league fields. Unverified against Stake's actual site (no public API to
+// check against) -- falls back to the raw href, then to a search link, if this can't
+// produce a confident guess.
+function stakeUrl(b) {
+  if (!b.event_url) return null;
+  const m = b.event_url.match(/\/sports\/([^\/]+?)(?:\/all)?$/);
+  if (!m) return null;
+  const idSlug = m[1];
+  const sport = (b.sport || '').toLowerCase();
+  const league = b.league || '';
+
+  if (sport === 'tennis') {
+    const tourMatch = league.match(/^(WTA|ATP)\s*-\s*([^,]+)/i);
+    if (tourMatch) {
+      const tour = tourMatch[1].toLowerCase();
+      const tournament = slugify(tourMatch[2]);
+      const genderSuffix = tour === 'wta' ? 'women-singles' : 'men-singles';
+      return `https://stake.com/sports/tennis/${tour}/${tournament}-${genderSuffix}/${idSlug}`;
+    }
+  }
+
+  // Generic best-effort for other sports: strip a "Country - " prefix off the league
+  // (e.g. "USA - MLB" -> "MLB") and slugify the rest as the category segment.
+  const leagueRest = league.replace(/^[^-]+-\s*/, '');
+  const leaguePart = slugify(leagueRest);
+  if (sport && leaguePart) {
+    return `https://stake.com/sports/${sport}/${leaguePart}/${idSlug}`;
+  }
+  return null;
+}
+
 function eventUrl(b) {
+  if (b.bookmaker === 'Stake') {
+    const guess = stakeUrl(b);
+    if (guess) return guess;
+  }
   if (b.event_url) return b.event_url;
   const domain = BOOKMAKER_DOMAINS[b.bookmaker];
   const query = (b.home||'') + ' ' + (b.away||'');
