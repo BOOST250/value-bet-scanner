@@ -800,21 +800,33 @@ function slugify(s) {
 }
 
 // Stake's API-provided href is missing its category path (e.g. gives
-// stake.com/sports/{id}-{slug}/all instead of
-// stake.com/sports/tennis/wta/wimbledon-women-singles/{id}-{slug}), which makes it
+// stake.com/sports/{id}-{slug}/all instead of the full
+// stake.com/sports/{sport}/{country}/{league}/{id}-{slug}), which makes it
 // slow/unreliable to land on directly. Reconstruct the full path best-effort from our
-// stored sport+league fields. Unverified against Stake's actual site (no public API to
-// check against) -- falls back to the raw href, then to a search link, if this can't
-// produce a confident guess.
+// stored sport+league fields. Confirmed against two real examples (Tennis, Football);
+// the federation-prefix stripping below is extrapolated from the one confirmed case
+// ("FIFA World Cup" -> "world-cup") to other federations we haven't verified. Esports
+// is excluded -- our "league" field there is "{game} - {competition}", not a
+// country/league pair, so there's no safe pattern to apply. Falls back to the raw
+// href, then to a search link, if this can't produce a confident guess.
+const STAKE_SPORT_MAP = { 'football': 'soccer' }; // our "Football" (soccer) -> Stake's "soccer"
+const STAKE_FEDERATION_PREFIXES = ['fifa', 'uefa', 'concacaf', 'conmebol', 'caf', 'ofc', 'afc', 'icc', 'fiba', 'fivb', 'ihf', 'avc', 'cev'];
+
+function stripFederationPrefix(words) {
+  return words[0] && STAKE_FEDERATION_PREFIXES.includes(words[0].toLowerCase()) ? words.slice(1) : words;
+}
+
 function stakeUrl(b) {
   if (!b.event_url) return null;
+  if (b.sport === 'Esports') return null;
   const m = b.event_url.match(/\/sports\/([^\/]+?)(?:\/all)?$/);
   if (!m) return null;
   const idSlug = m[1];
-  const sport = (b.sport || '').toLowerCase();
+  const rawSport = (b.sport || '').toLowerCase();
+  const sport = STAKE_SPORT_MAP[rawSport] || rawSport;
   const league = b.league || '';
 
-  if (sport === 'tennis') {
+  if (rawSport === 'tennis') {
     const tourMatch = league.match(/^(WTA|ATP)\s*-\s*([^,]+)/i);
     if (tourMatch) {
       const tour = tourMatch[1].toLowerCase();
@@ -822,16 +834,20 @@ function stakeUrl(b) {
       const genderSuffix = tour === 'wta' ? 'women-singles' : 'men-singles';
       return `https://stake.com/sports/tennis/${tour}/${tournament}-${genderSuffix}/${idSlug}`;
     }
+    return null;
   }
 
-  // Generic best-effort for other sports: strip a "Country - " prefix off the league
-  // (e.g. "USA - MLB" -> "MLB") and slugify the rest as the category segment.
-  const leagueRest = league.replace(/^[^-]+-\s*/, '');
-  const leaguePart = slugify(leagueRest);
-  if (sport && leaguePart) {
-    return `https://stake.com/sports/${sport}/${leaguePart}/${idSlug}`;
-  }
-  return null;
+  // Team sports: league is "{Country/Region} - {League name}[, qualifiers...]".
+  // Drop any ", qualifier" suffix (group/stage/gender) and a leading federation
+  // acronym, since Stake's category page is named after the competition itself.
+  const dashIdx = league.indexOf(' - ');
+  if (dashIdx === -1 || !sport) return null;
+  const country = slugify(league.slice(0, dashIdx));
+  const leagueNameRaw = league.slice(dashIdx + 3).split(',')[0].trim();
+  const leagueWords = stripFederationPrefix(leagueNameRaw.split(/\s+/));
+  const leagueSlug = slugify(leagueWords.join(' '));
+  if (!country || !leagueSlug) return null;
+  return `https://stake.com/sports/${sport}/${country}/${leagueSlug}/${idSlug}`;
 }
 
 function eventUrl(b) {
