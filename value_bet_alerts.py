@@ -12,8 +12,10 @@ from datetime import datetime, timezone
 import db as database
 
 API_BASE = "https://api.odds-api.io/v3"
-POLL_INTERVAL = 360  # seconds between checks
-GRADE_EVERY_N = 3    # grade settled bets every Nth cycle
+POLL_INTERVAL = 90   # seconds between checks -- 2 bookmakers/cycle means <72s would alone
+                      # exceed the 100 req/hr cap before grading even runs
+GRADE_EVERY_N = 16   # grade settled bets every Nth cycle (~24 min) -- kept slow so the
+                      # faster fetch loop has rate-limit headroom; grading isn't time-sensitive
 
 API_KEY = os.environ.get("ODDS_API_KEY", "")
 DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL", "")
