@@ -488,7 +488,13 @@ def main():
         sys.exit("Error: set ODDS_API_KEY environment variable")
 
     args = [a for a in sys.argv[1:] if not a.startswith("--")]
-    bookmakers = args[0].split(",") if args else DEFAULT_BOOKMAKERS
+    bookmakers_env = os.environ.get("BOOKMAKERS", "")
+    if bookmakers_env:
+        bookmakers = bookmakers_env.split(",")
+    elif args:
+        bookmakers = args[0].split(",")
+    else:
+        bookmakers = DEFAULT_BOOKMAKERS
     sport = args[1] if len(args) > 1 else None
 
     conn = database.init_db()
