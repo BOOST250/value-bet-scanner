@@ -1,11 +1,11 @@
 """
 Standalone WebSocket-based signal pipeline.
 
-Compares Stake's live odds against a devigged BetOnline.ag "sharp" line (via a
-second Odds-API.io account's WebSocket add-on) and logs positive-EV bets into the
-same `bets` table the main scanner (value_bet_alerts.py) uses, so they get
-graded/tracked/CLV'd identically to everything else. Polymarket scanning on the
-first account is untouched -- this is a fully separate process.
+Compares BC.Game's live odds against a devigged Betfair Exchange "sharp" line
+(via a second Odds-API.io account's WebSocket add-on) and logs positive-EV bets
+into the same `bets` table the main scanner (value_bet_alerts.py) uses, so they
+get graded/tracked/CLV'd identically to everything else. Polymarket+Roobet
+scanning on the first account is untouched -- this is a fully separate process.
 
 Run as its own process/service:  python stake_ws_scanner.py
 Requires:
@@ -13,7 +13,7 @@ Requires:
                           event metadata (team names/sport/league) via REST,
                           since the WebSocket itself only gives a numeric event id.
   ODDS_API_KEY_SHARP   -- the second account's key, with WebSocket access and
-                          Stake + BetOnline.ag selected as its 2 bookmakers.
+                          BC.Game + Betfair Exchange selected as its 2 bookmakers.
   DATABASE_URL         -- same Supabase connection as the rest of the app.
 """
 
@@ -32,8 +32,8 @@ WS_API_KEY = os.environ.get("ODDS_API_KEY_SHARP", "")
 FIRST_API_KEY = os.environ.get("ODDS_API_KEY", "")
 WS_URL = f"wss://api.odds-api.io/v3/ws?apiKey={WS_API_KEY}&markets=ML,Spread,Totals&channels=odds"
 
-TARGET_BOOK = "Stake"
-SHARP_BOOK = "BetOnline.ag"
+TARGET_BOOK = "BC.Game"
+SHARP_BOOK = "Betfair Exchange"
 
 # Same sport list as the bets table's distinct values; slugged the same way
 # grade_bets() does it elsewhere in the app (lowercase + hyphenate).
@@ -46,10 +46,10 @@ METADATA_REFRESH_INTERVAL = 900  # seconds (15 min). This shares ODDS_API_KEY's 
                                    # (~57/hr already). 9 sport slugs x 4 refreshes/hr = 36/hr,
                                    # leaving headroom. A shorter interval here was hitting 429s.
 
-MAX_STALENESS_SECONDS = 180  # reject a signal if Stake's and BetOnline's cached snapshots
-                              # for the same line weren't updated within this long of each
-                              # other -- otherwise a fast-moving line on one side gets compared
-                              # against a stale snapshot on the other, producing fake "edges".
+MAX_STALENESS_SECONDS = 180  # reject a signal if the two books' cached snapshots for the
+                              # same line weren't updated within this long of each other --
+                              # otherwise a fast-moving line on one side gets compared against
+                              # a stale snapshot on the other, producing fake "edges".
 
 
 def _parse_ts(ts: str):
@@ -69,8 +69,8 @@ odds_state: dict = {}
 
 
 def refresh_metadata_cache() -> None:
-    """Pull Stake's currently pending/live events per sport via REST (first key) to
-    resolve team names/sport/league -- the WebSocket only gives a numeric event id."""
+    """Pull TARGET_BOOK's currently pending/live events per sport via REST (first key)
+    to resolve team names/sport/league -- the WebSocket only gives a numeric event id."""
     new_cache: dict[int, dict] = {}
     for slug in SPORT_SLUGS:
         try:
@@ -120,19 +120,19 @@ def build_bet_id(event_id: int, market_name: str, side: str, hdp) -> str:
 
 
 def maybe_signal(conn, event_id: int, market_name: str, line_key, event_date: str) -> None:
-    """Compare Stake vs BetOnline for this exact event+market+line. Logs a bet if
-    Stake offers positive EV against the devigged sharp price."""
+    """Compare TARGET_BOOK vs SHARP_BOOK for this exact event+market+line. Logs a bet
+    if TARGET_BOOK offers positive EV against the devigged sharp price."""
     event_odds = odds_state.get(event_id, {})
-    stake_row = event_odds.get(TARGET_BOOK, {}).get(market_name, {}).get(line_key)
+    target_row = event_odds.get(TARGET_BOOK, {}).get(market_name, {}).get(line_key)
     sharp_row = event_odds.get(SHARP_BOOK, {}).get(market_name, {}).get(line_key)
-    if not stake_row or not sharp_row:
+    if not target_row or not sharp_row:
         return
 
-    stake_ts = _parse_ts(stake_row.get("updatedAt"))
+    target_ts = _parse_ts(target_row.get("updatedAt"))
     sharp_ts = _parse_ts(sharp_row.get("updatedAt"))
-    if not stake_ts or not sharp_ts:
+    if not target_ts or not sharp_ts:
         return
-    if abs((stake_ts - sharp_ts).total_seconds()) > MAX_STALENESS_SECONDS:
+    if abs((target_ts - sharp_ts).total_seconds()) > MAX_STALENESS_SECONDS:
         return
 
     # Totals uses over/under fields; ML and Spread use home/draw/away.
@@ -155,14 +155,14 @@ def maybe_signal(conn, event_id: int, market_name: str, line_key, event_date: st
         return  # not in cache yet -- will be retried on a future odds update
 
     for side, true_p in zip(sides, true_probs):
-        stake_odds_raw = stake_row["odds"].get(side)
-        if not stake_odds_raw:
+        target_odds_raw = target_row["odds"].get(side)
+        if not target_odds_raw:
             continue
         try:
-            stake_odds_val = float(stake_odds_raw)
+            target_odds_val = float(target_odds_raw)
         except (TypeError, ValueError):
             continue
-        ev_frac = stake_odds_val * true_p - 1
+        ev_frac = target_odds_val * true_p - 1
         if ev_frac <= 0:
             continue
 
@@ -181,7 +181,7 @@ def maybe_signal(conn, event_id: int, market_name: str, line_key, event_date: st
             "bookmaker": TARGET_BOOK,
             "betSide": bet_side,
             "market": {"name": market_name, "hdp": hdp},
-            "bookmakerOdds": {bet_side: stake_odds_val, "href": stake_row.get("url")},
+            "bookmakerOdds": {bet_side: target_odds_val, "href": target_row.get("url")},
             "expectedValue": 100 + ev_frac * 100,
             "event": {
                 "home": meta.get("home"),
@@ -195,7 +195,7 @@ def maybe_signal(conn, event_id: int, market_name: str, line_key, event_date: st
             log_bet(conn, bet_dict)
             print(
                 f"  [SIGNAL] {meta.get('home')} vs {meta.get('away')} | {market_name}"
-                f"{f' ({hdp})' if hdp is not None else ''} {bet_side} @ {stake_odds_val} "
+                f"{f' ({hdp})' if hdp is not None else ''} {bet_side} @ {target_odds_val} "
                 f"| EV={ev_frac * 100:+.1f}% vs sharp {sharp_odds}"
             )
         except Exception as exc:
@@ -273,5 +273,5 @@ if __name__ == "__main__":
         raise SystemExit("Error: set ODDS_API_KEY_SHARP environment variable")
     if not FIRST_API_KEY:
         raise SystemExit("Error: set ODDS_API_KEY environment variable")
-    print(f"Stake-vs-{SHARP_BOOK} WebSocket signal scanner starting...")
+    print(f"{TARGET_BOOK}-vs-{SHARP_BOOK} WebSocket signal scanner starting...")
     asyncio.run(run())
