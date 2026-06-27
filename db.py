@@ -103,7 +103,10 @@ CREATE_TABLE_SQLITE = """
         away_score    INTEGER,
         graded_at     TEXT,
         event_url     TEXT,
-        tracked       INTEGER DEFAULT 0
+        tracked       INTEGER DEFAULT 0,
+        clv_raw       REAL,
+        clv_true      REAL,
+        closing_odds  REAL
     )
 """
 
@@ -128,7 +131,10 @@ CREATE_TABLE_PG = """
         away_score    INTEGER,
         graded_at     TEXT,
         event_url     TEXT,
-        tracked       BOOLEAN DEFAULT FALSE
+        tracked       BOOLEAN DEFAULT FALSE,
+        clv_raw       DOUBLE PRECISION,
+        clv_true      DOUBLE PRECISION,
+        closing_odds  DOUBLE PRECISION
     )
 """
 
@@ -138,7 +144,14 @@ def init_db():
     if DATABASE_URL:
         cur = conn.cursor()
         cur.execute(CREATE_TABLE_PG)
-        for col, coltype in [("event_url", "TEXT"), ("tracked", "BOOLEAN DEFAULT FALSE")]:
+        new_columns = [
+            ("event_url", "TEXT"),
+            ("tracked", "BOOLEAN DEFAULT FALSE"),
+            ("clv_raw", "DOUBLE PRECISION"),
+            ("clv_true", "DOUBLE PRECISION"),
+            ("closing_odds", "DOUBLE PRECISION"),
+        ]
+        for col, coltype in new_columns:
             try:
                 cur.execute("SET statement_timeout = '5000'")
                 cur.execute(f"ALTER TABLE bets ADD COLUMN IF NOT EXISTS {col} {coltype}")
@@ -153,5 +166,8 @@ def init_db():
             conn.execute("ALTER TABLE bets ADD COLUMN event_url TEXT")
         if "tracked" not in existing:
             conn.execute("ALTER TABLE bets ADD COLUMN tracked INTEGER DEFAULT 0")
+        for col in ("clv_raw", "clv_true", "closing_odds"):
+            if col not in existing:
+                conn.execute(f"ALTER TABLE bets ADD COLUMN {col} REAL")
     conn.commit()
     return conn

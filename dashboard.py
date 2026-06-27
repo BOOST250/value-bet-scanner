@@ -443,7 +443,9 @@ def api_stats():
                COALESCE(SUM(CASE WHEN status='pending' THEN 1 END), 0) p,
                COALESCE(SUM(CASE WHEN status='won' THEN odds - 1 END), 0) profit_w,
                COALESCE(SUM(CASE WHEN status='lost' THEN 1 END), 0) loss_units,
-               COALESCE(SUM({NET_PROFIT_SQL}), 0) net_profit"""
+               COALESCE(SUM({NET_PROFIT_SQL}), 0) net_profit,
+               AVG(clv_true) avg_clv_true,
+               COUNT(clv_raw) clv_n"""
 
     by_bookmaker = database.fetchall(conn, f"SELECT bookmaker, {BREAKDOWN_COLS} FROM bets GROUP BY bookmaker")
     by_sport = database.fetchall(conn, f"SELECT sport, {BREAKDOWN_COLS} FROM bets GROUP BY sport ORDER BY total DESC")
@@ -842,11 +844,18 @@ function trackBtn(b) {
     (tracked ? '★' : '☆') + '</button>';
 }
 
+function fmtClv(b) {
+  if (b.clv_true == null) return '-';
+  const cls = b.clv_true >= 0 ? 'green' : 'red';
+  const title = 'vs Pinnacle closing ' + b.closing_odds.toFixed(3) + ' (de-vigged CLV; raw CLV ' + (b.clv_raw>=0?'+':'') + b.clv_raw.toFixed(1) + '%)';
+  return '<span class="' + cls + '" title="' + title + '">' + (b.clv_true>=0?'+':'') + b.clv_true.toFixed(1) + '%</span>';
+}
+
 function renderTable(bets, showResult) {
   if (!bets.length) return '<div class="empty">No bets found</div>';
   let h = '<table><thead><tr>' +
     '<th></th><th>Match</th><th>Sport</th><th>Bookmaker</th><th>Side</th><th>Market</th><th>Odds</th><th>EV</th>' +
-    (showResult ? '<th>Score</th><th>Result</th>' : '<th>Liquidity</th><th>Kick-off</th><th>Detected</th>') +
+    (showResult ? '<th>Score</th><th>Result</th><th>CLV</th>' : '<th>Liquidity</th><th>Kick-off</th><th>Detected</th>') +
     '<th></th>' +
     '</tr></thead><tbody>';
   for (const b of bets) {
@@ -862,6 +871,7 @@ function renderTable(bets, showResult) {
     if (showResult) {
       h += '<td>' + (b.home_score != null ? b.home_score + '-' + b.away_score : '-') + '</td>';
       h += '<td><span class="badge ' + b.status + '">' + b.status.toUpperCase() + '</span></td>';
+      h += '<td>' + fmtClv(b) + '</td>';
     } else {
       h += '<td title="Size available at the current best price for your side, live from the bookmaker">' + fmtLiquidity(b) + '</td>';
       h += '<td>' + fmtDate(b.match_date) + '</td>';
@@ -878,7 +888,7 @@ const MIN_SAMPLE_SIZE = 30;
 
 function bucketTable(title, rows, nameKey) {
   let h = '<div class="breakdown-card"><h3>' + title + '</h3>';
-  h += '<table class="bucket-table"><thead><tr><th>' + (nameKey === 'label' ? 'Range' : nameKey.charAt(0).toUpperCase()+nameKey.slice(1)) + '</th><th>Total</th><th>W</th><th>L</th><th>Pending</th><th>Win%</th><th>ROI</th><th>Profit</th><th>Net ROI</th><th>Net Profit</th></tr></thead><tbody>';
+  h += '<table class="bucket-table"><thead><tr><th>' + (nameKey === 'label' ? 'Range' : nameKey.charAt(0).toUpperCase()+nameKey.slice(1)) + '</th><th>Total</th><th>W</th><th>L</th><th>Pending</th><th>Win%</th><th>ROI</th><th>Profit</th><th>Net ROI</th><th>Net Profit</th><th title="Avg CLV vs Pinnacle closing line (de-vigged), where matchable">CLV</th></tr></thead><tbody>';
   for (const r of rows) {
     if (r.total === 0) continue;
     const st = r.w + r.l;
@@ -893,6 +903,10 @@ function bucketTable(title, rows, nameKey) {
     const wrCls = wr !== '-' ? (parseFloat(wr) >= 50 ? 'green' : 'red') : '';
     const profitCls = profit !== null ? (profit >= 0 ? 'green' : 'red') : '';
     const netProfitCls = netProfit !== null ? (netProfit >= 0 ? 'green' : 'red') : '';
+    const clvCls = r.avg_clv_true != null ? (r.avg_clv_true >= 0 ? 'green' : 'red') : '';
+    const clvText = r.avg_clv_true != null
+      ? (r.avg_clv_true>=0?'+':'') + r.avg_clv_true.toFixed(1) + '% (n=' + r.clv_n + ')'
+      : '-';
     h += '<tr' + (lowSample ? ' class="low-sample"' : '') + '>';
     h += '<td><strong>' + r[nameKey] + '</strong>' + (lowSample ? ' <span class="sample-badge" title="Fewer than ' + MIN_SAMPLE_SIZE + ' settled bets — not statistically meaningful yet">low sample</span>' : '') + '</td>';
     h += '<td>' + r.total + '</td>';
@@ -904,6 +918,7 @@ function bucketTable(title, rows, nameKey) {
     h += '<td class="' + (lowSample ? '' : profitCls) + '">' + (profit !== null ? (profit>=0?'+':'') + profit.toFixed(1) + 'u' : '-') + '</td>';
     h += '<td class="' + (lowSample ? '' : netRoiCls) + '">' + (netRoi !== '-' ? (parseFloat(netRoi)>=0?'+':'') + netRoi + '%' : '-') + '</td>';
     h += '<td class="' + (lowSample ? '' : netProfitCls) + '">' + (netProfit !== null ? (netProfit>=0?'+':'') + netProfit.toFixed(1) + 'u' : '-') + '</td>';
+    h += '<td class="' + clvCls + '">' + clvText + '</td>';
     h += '</tr>';
   }
   h += '</tbody></table></div>';

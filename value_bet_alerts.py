@@ -186,6 +186,140 @@ def grade_bets(conn) -> None:
         print(f"  Graded {graded_count} bet(s)")
 
 # ---------------------------------------------------------------------------
+# CLV (closing line value) vs Pinnacle, via the BettingIsCool API
+# ---------------------------------------------------------------------------
+
+BIC_API_KEY = os.environ.get("BETTINGISCOOL_API_KEY", "")
+BIC_BASE = "https://api.bettingiscool.com"
+CLV_EVERY_N = 10        # run every 10th cycle (~15 min) -- closing lines don't go stale,
+                         # so this only needs to keep up with newly-settled bets
+CLV_BATCH_LIMIT = 300    # cap per run so a big backlog spreads across several cycles
+                         # instead of one long-running call
+
+# Team-sport markets match cleanly to Pinnacle's moneyline/spread/totals on a single
+# fixture. Tennis is special-cased below: ML maps to the plain fixture's "moneyline",
+# Totals (Games) maps to a separate "(Games)"-suffixed fixture's "totals" (period 0).
+# Spread and sets-based Totals are skipped for Tennis -- Pinnacle doesn't offer a
+# comparable sets-handicap market for ITF-tier matches.
+CLV_SPORT_IDS = {"Baseball": 3, "Basketball": 4, "Football": 29, "Tennis": 33}
+CLV_TEAM_MARKETS = {"ML": "moneyline", "Spread": "spread", "Totals": "totals"}
+CLV_STOPWORDS = {"the", "fc", "sc", "cf", "afc", "club", "city", "united", "town", "games"}
+
+
+def _clv_name_tokens(name: str) -> set:
+    import re
+    words = re.findall(r"[a-z]+", (name or "").lower())
+    return {w for w in words if len(w) >= 3 and w not in CLV_STOPWORDS}
+
+
+def _bic_get(path: str, params: dict):
+    try:
+        resp = requests.get(f"{BIC_BASE}{path}", params=params, headers={"X-API-Key": BIC_API_KEY}, timeout=30)
+        time.sleep(0.15)
+        if resp.status_code != 200:
+            return None
+        return resp.json()
+    except requests.RequestException:
+        return None
+
+
+def fetch_clv(conn) -> None:
+    if not BIC_API_KEY:
+        return
+
+    rows = database.fetchall(conn, """
+        SELECT id, sport, market, hdp, bet_side, odds, home, away, match_date
+        FROM bets
+        WHERE status IN ('won','lost','push')
+          AND clv_raw IS NULL
+          AND sport IN ('Baseball','Basketball','Football','Tennis')
+          AND (
+            (sport != 'Tennis' AND market IN ('ML','Spread','Totals'))
+            OR (sport = 'Tennis' AND market IN ('ML','Totals (Games)'))
+          )
+        ORDER BY match_date
+        LIMIT ?
+    """, (CLV_BATCH_LIMIT,))
+    if not rows:
+        return
+
+    by_day: dict[tuple, list] = {}
+    for r in rows:
+        day = r["match_date"][:10]
+        by_day.setdefault((r["sport"], day), []).append(r)
+
+    fixtures_cache: dict[tuple, list] = {}
+    for sport, day in by_day:
+        if (sport, day) in fixtures_cache:
+            continue
+        data = _bic_get("/api/fixtures", {
+            "sport_id": CLV_SPORT_IDS[sport],
+            "starts_from": day,
+            "starts_to": day,
+            "limit": 1000,
+            "closing_available": 1,
+        })
+        fixtures_cache[(sport, day)] = data or []
+
+    matched: list[tuple] = []
+    for (sport, day), day_rows in by_day.items():
+        fixtures = fixtures_cache.get((sport, day), [])
+        for r in day_rows:
+            is_games = r["market"] == "Totals (Games)"
+            cands = [f for f in fixtures if ("(Games)" in f["runner_home"]) == is_games] if sport == "Tennis" else fixtures
+            home_tok = _clv_name_tokens(r["home"])
+            away_tok = _clv_name_tokens(r["away"])
+            hits = [
+                f for f in cands
+                if home_tok & _clv_name_tokens(f["runner_home"]) and away_tok & _clv_name_tokens(f["runner_away"])
+            ]
+            if len(hits) == 1:
+                matched.append((r, hits[0]["event_id"]))
+
+    odds_cache: dict[int, list] = {}
+    for _, eid in matched:
+        if eid not in odds_cache:
+            odds_cache[eid] = _bic_get("/api/odds", {"event_id": eid}) or []
+
+    updated = 0
+    now = datetime.now(timezone.utc).isoformat()
+    for r, eid in matched:
+        odds_rows = odds_cache.get(eid, [])
+        if r["sport"] == "Tennis":
+            if r["market"] == "ML":
+                cands = [o for o in odds_rows if o["market"] == "moneyline"]
+            else:
+                cands = [
+                    o for o in odds_rows
+                    if o["market"] == "totals" and o.get("period") == 0
+                    and o.get("line") is not None and r["hdp"] is not None and abs(o["line"] - r["hdp"]) < 0.01
+                ]
+        else:
+            market_name = CLV_TEAM_MARKETS[r["market"]]
+            cands = [o for o in odds_rows if o["market"] == market_name]
+            if r["market"] in ("Spread", "Totals") and r["hdp"] is not None:
+                cands = [o for o in cands if o.get("line") is not None and abs(abs(o["line"]) - abs(r["hdp"])) < 0.01]
+        if not cands:
+            continue
+        row = cands[0]
+        side = r["bet_side"]
+        raw, true = (row.get("odds1"), row.get("todds1")) if side == "home" else (row.get("odds2"), row.get("todds2"))
+        if raw is None:
+            continue
+        clv_raw = (r["odds"] / raw - 1) * 100
+        clv_true = (r["odds"] / true - 1) * 100 if true else None
+        database.execute(
+            conn,
+            "UPDATE bets SET clv_raw=?, clv_true=?, closing_odds=? WHERE id=?",
+            (clv_raw, clv_true, raw, r["id"]),
+        )
+        updated += 1
+
+    if updated:
+        database.commit(conn)
+        print(f"  CLV computed for {updated} bet(s) ({len(rows)} candidates, {len(matched)} matched)")
+
+# ---------------------------------------------------------------------------
 # Stats
 # ---------------------------------------------------------------------------
 
@@ -308,7 +442,7 @@ def send_discord_alert(bets: list[dict]) -> None:
 # Main loop
 # ---------------------------------------------------------------------------
 
-def run_once(conn, seen_ids: set[str], bookmakers: list[str], sport: str | None = None, do_grade: bool = True) -> int:
+def run_once(conn, seen_ids: set[str], bookmakers: list[str], sport: str | None = None, do_grade: bool = True, do_clv: bool = False) -> int:
     all_new: list[dict] = []
 
     for bookmaker in bookmakers:
@@ -338,6 +472,8 @@ def run_once(conn, seen_ids: set[str], bookmakers: list[str], sport: str | None 
 
     if do_grade:
         grade_bets(conn)
+    if do_clv:
+        fetch_clv(conn)
     return len(all_new)
 
 
@@ -359,14 +495,17 @@ def main():
     seen_ids = load_seen_ids(conn)
     print(f"Value-bet scanner started | bookmakers={','.join(bookmakers)} sport={sport or 'all'}")
     print(f"Loaded {len(seen_ids)} previously seen bets from DB")
-    print(f"Polling every {POLL_INTERVAL}s, grading every {GRADE_EVERY_N} cycles. Press Ctrl+C to stop.\n")
+    print(f"Polling every {POLL_INTERVAL}s, grading every {GRADE_EVERY_N} cycles, "
+          f"CLV every {CLV_EVERY_N} cycles ({'on' if BIC_API_KEY else 'off -- no BETTINGISCOOL_API_KEY'}). "
+          f"Press Ctrl+C to stop.\n")
 
     cycle = 0
     while True:
         cycle += 1
         do_grade = (cycle % GRADE_EVERY_N == 0)
+        do_clv = (cycle % CLV_EVERY_N == 0)
         try:
-            run_once(conn, seen_ids, bookmakers, sport, do_grade=do_grade)
+            run_once(conn, seen_ids, bookmakers, sport, do_grade=do_grade, do_clv=do_clv)
         except Exception as e:
             print(f"  Unexpected error: {e}")
             try:
