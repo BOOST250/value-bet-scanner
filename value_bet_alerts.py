@@ -20,7 +20,7 @@ GRADE_EVERY_N = 16   # grade settled bets every Nth cycle (~24 min) -- kept slow
 API_KEY = os.environ.get("ODDS_API_KEY", "")
 DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL", "")
 
-DEFAULT_BOOKMAKERS = ["Polymarket"]
+DEFAULT_BOOKMAKERS = ["Polymarket", "Roobet"]
 
 # ---------------------------------------------------------------------------
 # Database
