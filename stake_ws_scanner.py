@@ -20,7 +20,7 @@ Requires:
 import asyncio
 import json
 import os
-import time
+from datetime import datetime
 
 import requests
 import websockets
@@ -45,6 +45,20 @@ METADATA_REFRESH_INTERVAL = 900  # seconds (15 min). This shares ODDS_API_KEY's 
                                    # cap with the main worker's Polymarket polling + grading
                                    # (~57/hr already). 9 sport slugs x 4 refreshes/hr = 36/hr,
                                    # leaving headroom. A shorter interval here was hitting 429s.
+
+MAX_STALENESS_SECONDS = 180  # reject a signal if Stake's and BetOnline's cached snapshots
+                              # for the same line weren't updated within this long of each
+                              # other -- otherwise a fast-moving line on one side gets compared
+                              # against a stale snapshot on the other, producing fake "edges".
+
+
+def _parse_ts(ts: str):
+    if not ts:
+        return None
+    try:
+        return datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    except ValueError:
+        return None
 
 # event_cache[event_id] = {"home":..., "away":..., "sport":..., "league":...}
 event_cache: dict[int, dict] = {}
@@ -112,6 +126,13 @@ def maybe_signal(conn, event_id: int, market_name: str, line_key, event_date: st
     stake_row = event_odds.get(TARGET_BOOK, {}).get(market_name, {}).get(line_key)
     sharp_row = event_odds.get(SHARP_BOOK, {}).get(market_name, {}).get(line_key)
     if not stake_row or not sharp_row:
+        return
+
+    stake_ts = _parse_ts(stake_row.get("updatedAt"))
+    sharp_ts = _parse_ts(sharp_row.get("updatedAt"))
+    if not stake_ts or not sharp_ts:
+        return
+    if abs((stake_ts - sharp_ts).total_seconds()) > MAX_STALENESS_SECONDS:
         return
 
     # Totals uses over/under fields; ML and Spread use home/draw/away.
@@ -197,11 +218,13 @@ def handle_message(conn, msg: dict) -> None:
         market_name = m.get("name")
         if market_name not in ("ML", "Spread", "Totals"):
             continue
+        updated_at = m.get("updatedAt")
         for odds_row in m.get("odds", []):
             line_key = odds_row.get("hdp")  # None for ML
             odds_state.setdefault(event_id, {}).setdefault(bookie, {}).setdefault(market_name, {})[line_key] = {
                 "odds": odds_row,
                 "url": msg.get("url"),
+                "updatedAt": updated_at,
             }
             maybe_signal(conn, event_id, market_name, line_key, event_date)
 
