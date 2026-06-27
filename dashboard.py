@@ -405,8 +405,14 @@ def api_tracker():
 # coin-flip bets, since longshots require buying many more cheap contracts per dollar staked.
 FEE_RATE_SQL = "CASE WHEN bookmaker='Polymarket' THEN 0.03 WHEN bookmaker='Kalshi' THEN 0.07 ELSE 0 END"
 FEE_SQL = f"(({FEE_RATE_SQL}) * (1 - 1.0/odds))"
+
+# Betfair Exchange charges 2.5% commission on net winnings only -- a flat cut of profit,
+# not the per-contract formula above. No commission on a loss or push (no profit to take
+# a cut from).
+BETFAIR_COMMISSION_SQL = "CASE WHEN bookmaker='Betfair Exchange' THEN 0.025 * (odds - 1) ELSE 0 END"
+
 NET_PROFIT_SQL = f"""CASE
-    WHEN status='won' THEN (odds - 1) - {FEE_SQL}
+    WHEN status='won' THEN (odds - 1) - {FEE_SQL} - ({BETFAIR_COMMISSION_SQL})
     WHEN status='lost' THEN -1 - {FEE_SQL}
     WHEN status='push' THEN -{FEE_SQL}
   END"""
