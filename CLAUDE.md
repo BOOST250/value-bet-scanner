@@ -4,7 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Value bet scanner that polls the Odds-API.io `/value-bets` endpoint, logs bets to a database, auto-grades settled bets against match results, computes closing-line value (CLV) against Pinnacle, and serves a live web dashboard. Runs as two independent worker instances (one per Odds-API.io account/key, each locked to its own 2-bookmaker pair) plus one dashboard process, deployed as separate Railway services sharing one database.
+Value bet scanner that polls the Odds-API.io `/value-bets` endpoint, logs bets to a database, auto-grades settled bets against match results, and serves a live web dashboard. Runs as two independent worker instances (one per Odds-API.io account/key, each locked to its own 2-bookmaker pair) plus one dashboard process, deployed as separate Railway services sharing one database.
+
+CLV (closing-line value) tracking against Pinnacle via the BettingIsCool API has been disabled — `fetch_clv()` was removed from `value_bet_alerts.py` and is never called, so no BettingIsCool requests are made. The `clv_raw`/`clv_true`/`closing_odds` columns and dashboard CLV display still exist for historical data already computed, but no new values are written.
 
 ## Running
 
@@ -36,24 +38,23 @@ Both the scanner and dashboard read/write the same database — run them in sepa
 - `DATABASE_URL` — Postgres connection string; omit to fall back to local SQLite (`bets.db`)
 - `BOOKMAKERS` — optional comma-separated bookmaker pair, overrides `DEFAULT_BOOKMAKERS`/argv (see note above on why this exists)
 - `DISCORD_WEBHOOK_URL` — optional; Discord webhook for new-bet alerts
-- `BETTINGISCOOL_API_KEY` — optional; enables CLV computation against Pinnacle closing lines. Without it, `fetch_clv()` is a no-op and CLV columns show "-"
+- `BETTINGISCOOL_API_KEY` — unused; CLV tracking has been disabled (see Project Overview), this var has no effect even if set
 
 ## Architecture
 
-**Two scanner instances, one codebase.** `value_bet_alerts.py` is deployed twice as separate Railway services (e.g. `worker` and a second service), each with its own `ODDS_API_KEY` pointing at a different Odds-API.io account and its own bookmaker pair (via `BOOKMAKERS` or argv). Odds-API.io plans are locked to 2 bookmakers per account/key — once you've queried 2 bookmakers, the account locks onto that pair via `/bookmakers/selected/select` until cleared via `/bookmakers/selected/clear`. Both instances write to the same `bets` table, so dashboard/grading/CLV are bookmaker-agnostic and need no per-instance awareness.
+**Two scanner instances, one codebase.** `value_bet_alerts.py` is deployed twice as separate Railway services (e.g. `worker` and a second service), each with its own `ODDS_API_KEY` pointing at a different Odds-API.io account and its own bookmaker pair (via `BOOKMAKERS` or argv). Odds-API.io plans are locked to 2 bookmakers per account/key — once you've queried 2 bookmakers, the account locks onto that pair via `/bookmakers/selected/select` until cleared via `/bookmakers/selected/clear`. Both instances write to the same `bets` table, so dashboard/grading are bookmaker-agnostic and need no per-instance awareness.
 
 **`db.py`** — Database abstraction, SQLite when `DATABASE_URL` is unset, Postgres otherwise
 - `execute()`/`fetchall()`/`fetchone()` take `?`-style placeholders; `_adapt_query()` rewrites them to `%s` and adapts `INSERT OR IGNORE` → `INSERT ... ON CONFLICT DO NOTHING` for Postgres
-- `init_db()` creates the `bets` table and adds any new columns (`event_url`, `tracked`, `clv_raw`, `clv_true`, `closing_odds`) via best-effort `ALTER TABLE` with a short statement timeout on Postgres — failures are logged and swallowed, not fatal, since concurrent workers race to add the same column on startup
+- `init_db()` creates the `bets` table and adds any new columns (`event_url`, `tracked`, `clv_raw`, `clv_true`, `closing_odds`) via best-effort `ALTER TABLE` with a short statement timeout on Postgres — failures are logged and swallowed, not fatal, since concurrent workers race to add the same column on startup. The `clv_*` columns are legacy (CLV tracking is disabled, see Project Overview) but kept for historical data already computed before it was turned off
 
-**`value_bet_alerts.py`** — Scanner + grading + CLV engine
+**`value_bet_alerts.py`** — Scanner + grading
 - `fetch_value_bets()` → `GET /v3/value-bets?bookmaker=X&includeEventDetails=true`
 - `filter_bets()` → keeps bets with `expectedValue > 100` (100 is break-even in API units; 105 = +5% EV)
 - `log_bet()` → inserts into `bets`; aliases market name `Moneyline`/`1X2` → `ML` so esports/3-way markets aren't fragmented from `ML` in downstream aggregation
 - `grade_bets()` → each cycle, groups pending bets (past `match_date`) by sport slug, fetches `GET /v3/events?sport=X&status=settled`, grades ML/Spread/Totals/Totals HT; voids tennis matches that settled 0-0 (impossible score, means cancelled/walkover)
-- `fetch_clv(conn)` → matches settled bets to Pinnacle fixtures/odds via the BettingIsCool API by date + team-name token overlap, gated behind `BETTINGISCOOL_API_KEY`; runs every `CLV_EVERY_N` cycles, capped at `CLV_BATCH_LIMIT` per run. Coverage is intentionally narrow (`CLV_SPORT_IDS`/`CLV_TEAM_MARKETS`) — only sports/markets validated to match Pinnacle's fixture/market shape cleanly; Tennis is special-cased (Totals (Games) lives on a separate "(Games)"-suffixed fixture)
 - `seen_ids` loaded from DB on startup so restarts don't re-alert/re-log already-seen bets
-- Polling/grading/CLV cadence is rate-limit-driven, not arbitrary: see the comments by `POLL_INTERVAL`/`GRADE_EVERY_N`/`CLV_EVERY_N` for the request-budget math (Odds-API.io caps at 100 req/hr per key)
+- Polling/grading cadence is rate-limit-driven, not arbitrary: see the comments by `POLL_INTERVAL`/`GRADE_EVERY_N` for the request-budget math (Odds-API.io caps at 100 req/hr per key)
 
 **`dashboard.py`** — Flask dashboard (single-file; HTML/JS is the `INDEX_HTML` string at the bottom of the file)
 - `/api/live`, `/api/results`, `/api/tracker` (user-starred bets + daily/cumulative P&L), `/api/track` (toggle starred), `/api/stats` (EV/odds/sport/bookmaker/market breakdowns)
@@ -80,4 +81,4 @@ Both the scanner and dashboard read/write the same database — run them in sepa
 - Each Odds-API.io account/key is locked to 2 bookmakers at a time (see "Two scanner instances" above)
 - Prediction markets (Polymarket, Kalshi) have **no live/in-play odds** — `/value-bets` returns pre-game only for those
 - `/odds/movements` returns no data for Polymarket/Kalshi
-- 100 req/hr cap per key, shared across fetch + grading + CLV cycles for that instance — see the rate-budget comments in `value_bet_alerts.py` before changing any interval
+- 100 req/hr cap per key, shared across fetch + grading cycles for that instance — see the rate-budget comments in `value_bet_alerts.py` before changing any interval
