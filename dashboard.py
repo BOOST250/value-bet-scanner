@@ -298,8 +298,8 @@ def index():
     return INDEX_HTML
 
 
-EV_BUCKETS = [("0-1%", 100, 101), ("1-2%", 101, 102), ("2-5%", 102, 105),
-              ("5-10%", 105, 110), ("10-20%", 110, 120), ("20%+", 120, 9999)]
+EV_BUCKETS = [("0-0.5%", 100, 100.5), ("0.5-1%", 100.5, 101), ("1-2%", 101, 102),
+              ("2-5%", 102, 105), ("5-10%", 105, 110), ("10-20%", 110, 120), ("20%+", 120, 9999)]
 ODDS_BUCKETS = [("1.01-1.30", 1.01, 1.30), ("1.30-1.60", 1.30, 1.60),
                 ("1.60-2.00", 1.60, 2.00), ("2.00-2.50", 2.00, 2.50),
                 ("2.50-3.50", 2.50, 3.50), ("3.50+", 3.50, 9999)]
@@ -820,7 +820,7 @@ document.querySelectorAll('.tab').forEach(t => {
 
 // Filter preferences persist across reloads via localStorage -- the dashboard keeps
 // logging every bet regardless; this only controls what's *shown*.
-const EV_BUCKET_LABELS = ['0-1%', '1-2%', '2-5%', '5-10%', '10-20%', '20%+'];
+const EV_BUCKET_LABELS = ['0-0.5%', '0.5-1%', '1-2%', '2-5%', '5-10%', '10-20%', '20%+'];
 const ODDS_BUCKET_LABELS = ['1.01-1.30', '1.30-1.60', '1.60-2.00', '2.00-2.50', '2.50-3.50', '3.50+'];
 const FILTER_GROUPS = ['sport', 'bookmaker', 'market', 'ev_bucket', 'odds_bucket'];
 
