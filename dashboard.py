@@ -11,6 +11,7 @@ import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
 
 import requests
 from flask import Flask, jsonify, request
@@ -351,6 +352,31 @@ def api_track():
     return jsonify({"ok": True})
 
 
+@app.route("/api/grade", methods=["POST"])
+def api_grade():
+    # Manual override for markets the grader can't settle itself (e.g. Bookings/Corners
+    # Totals -- the events feed has no corner/booking counts). Only allowed starting from
+    # 'void' so it can't be used to overwrite an already-correct auto-graded result.
+    data = request.get_json(force=True) or {}
+    bet_id = data.get("id")
+    status = data.get("status")
+    if not bet_id or status not in ("won", "lost", "push"):
+        return jsonify({"error": "missing id or invalid status"}), 400
+    conn = database.get_conn()
+    row = database.fetchone(conn, "SELECT status FROM bets WHERE id = ?", (bet_id,))
+    if not row or row["status"] != "void":
+        database.close(conn)
+        return jsonify({"error": "bet not found or not void"}), 400
+    database.execute(
+        conn,
+        "UPDATE bets SET status=?, graded_at=? WHERE id=?",
+        (status, datetime.now(timezone.utc).isoformat(), bet_id),
+    )
+    database.commit(conn)
+    database.close(conn)
+    return jsonify({"ok": True})
+
+
 @app.route("/api/tracker")
 def api_tracker():
     conn = database.get_conn()
@@ -595,6 +621,11 @@ INDEX_HTML = """<!DOCTYPE html>
   .badge.push { background:rgba(234,179,8,.15); color:var(--yellow); }
   .badge.pending { background:rgba(59,130,246,.1); color:var(--blue); }
   .badge.void { background:rgba(139,143,163,.15); color:var(--dim); }
+
+  .manual-grade {
+    margin-left:6px; font-size:11px; background:var(--card); color:var(--text);
+    border:1px solid var(--border); border-radius:4px; padding:1px 4px;
+  }
 
   .ev-positive { color:var(--green); font-weight:600; }
 
@@ -870,7 +901,7 @@ function eventUrl(b) {
   return 'https://www.google.com/search?q=' + encodeURIComponent((b.bookmaker||'') + ' ' + query);
 }
 
-const TOTALS_MARKETS = new Set(['Totals', 'Totals (Games)', 'Total Maps', 'Totals HT']);
+const TOTALS_MARKETS = new Set(['Totals', 'Totals (Games)', 'Total Maps', 'Totals HT', 'Bookings Totals', 'Corners Totals', 'Team Total Home', 'Team Total Away']);
 
 function sideLabel(b) {
   if (TOTALS_MARKETS.has(b.market)) {
@@ -910,6 +941,31 @@ function trackBtn(b) {
     (tracked ? '★' : '☆') + '</button>';
 }
 
+async function manualGrade(id, status) {
+  if (!status) return;
+  await fetch('/api/grade', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({id: id, status: status}),
+  });
+  refresh();
+}
+
+document.addEventListener('change', (e) => {
+  const sel = e.target.closest('.manual-grade');
+  if (sel) manualGrade(sel.dataset.id, sel.value);
+});
+
+function manualGradeControl(b) {
+  if (b.status !== 'void') return '';
+  return ' <select class="manual-grade" title="Grade manually" data-id="' + b.id + '">' +
+    '<option value="">Grade…</option>' +
+    '<option value="won">Won</option>' +
+    '<option value="lost">Lost</option>' +
+    '<option value="push">Push</option>' +
+    '</select>';
+}
+
 function fmtClv(b) {
   if (b.clv_true == null) return '-';
   const cls = b.clv_true >= 0 ? 'green' : 'red';
@@ -936,7 +992,7 @@ function renderTable(bets, showResult) {
     h += '<td class="ev-positive">' + fmtEv(b.expected_value) + '</td>';
     if (showResult) {
       h += '<td>' + (b.home_score != null ? b.home_score + '-' + b.away_score : '-') + '</td>';
-      h += '<td><span class="badge ' + b.status + '">' + b.status.toUpperCase() + '</span></td>';
+      h += '<td><span class="badge ' + b.status + '">' + b.status.toUpperCase() + '</span>' + manualGradeControl(b) + '</td>';
       h += '<td>' + fmtClv(b) + '</td>';
     } else {
       h += '<td title="Size available at the current best price for your side, live from the bookmaker">' + fmtLiquidity(b) + '</td>';
@@ -1120,7 +1176,7 @@ function renderTrackerList(bets) {
     h += '<td>' + (b.market||'-') + (b.hdp ? ' ('+b.hdp+')' : '') + '</td>';
     h += '<td>' + fmtOdds(b.odds) + '</td>';
     h += '<td>' + (b.home_score != null ? b.home_score + '-' + b.away_score : '-') + '</td>';
-    h += '<td><span class="badge ' + b.status + '">' + b.status.toUpperCase() + '</span></td>';
+    h += '<td><span class="badge ' + b.status + '">' + b.status.toUpperCase() + '</span>' + manualGradeControl(b) + '</td>';
     h += '</tr>';
   }
   h += '</tbody></table>';

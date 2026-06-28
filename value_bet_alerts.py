@@ -116,6 +116,12 @@ def grade_bet_row(row, home_score: int, away_score: int, ht_score: tuple[int, in
         if ht_score is None:
             return "void"
         return grade_totals(ht_score[0], ht_score[1], side, row["hdp"] or 0)
+    if market == "Team Total Home":
+        return grade_totals(home_score, 0, side, row["hdp"] or 0)
+    if market == "Team Total Away":
+        return grade_totals(away_score, 0, side, row["hdp"] or 0)
+    # Corners/bookings markets need per-match corner/booking counts, which the
+    # /v3/events feed doesn't provide (only goals) -- ungradable, stays void.
     return "void"
 
 
