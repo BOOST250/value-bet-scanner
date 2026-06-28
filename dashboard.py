@@ -298,25 +298,41 @@ def index():
     return INDEX_HTML
 
 
+EV_BUCKETS = [("0-1%", 100, 101), ("1-2%", 101, 102), ("2-5%", 102, 105),
+              ("5-10%", 105, 110), ("10-20%", 110, 120), ("20%+", 120, 9999)]
+ODDS_BUCKETS = [("1.01-1.30", 1.01, 1.30), ("1.30-1.60", 1.30, 1.60),
+                ("1.60-2.00", 1.60, 2.00), ("2.00-2.50", 2.00, 2.50),
+                ("2.50-3.50", 2.50, 3.50), ("3.50+", 3.50, 9999)]
+
+
 def apply_filters(bets: list) -> list:
-    sport = request.args.get("sport", "")
-    bookmaker = request.args.get("bookmaker", "")
-    market = request.args.get("market", "")
-    odds_min = request.args.get("odds_min", "")
-    odds_max = request.args.get("odds_max", "")
-    ev_min = request.args.get("ev_min", "")
-    if sport:
-        bets = [b for b in bets if b["sport"] == sport]
-    if bookmaker:
-        bets = [b for b in bets if b["bookmaker"] == bookmaker]
-    if market:
-        bets = [b for b in bets if b["market"] == market]
-    if odds_min:
-        bets = [b for b in bets if b["odds"] is not None and b["odds"] >= float(odds_min)]
-    if odds_max:
-        bets = [b for b in bets if b["odds"] is not None and b["odds"] <= float(odds_max)]
-    if ev_min:
-        bets = [b for b in bets if b["expected_value"] is not None and (b["expected_value"] - 100) >= float(ev_min)]
+    # Multi-select preference filters (sport/bookmaker/market checkboxes, EV/odds bucket
+    # checkboxes) sent as repeated query params -- an empty list for a group means "no
+    # filter" (show everything), matching how the dashboard's preferences popup behaves.
+    sports = request.args.getlist("sport")
+    bookmakers = request.args.getlist("bookmaker")
+    markets = request.args.getlist("market")
+    ev_bucket_labels = request.args.getlist("ev_bucket")
+    odds_bucket_labels = request.args.getlist("odds_bucket")
+
+    if sports:
+        bets = [b for b in bets if b["sport"] in sports]
+    if bookmakers:
+        bets = [b for b in bets if b["bookmaker"] in bookmakers]
+    if markets:
+        bets = [b for b in bets if b["market"] in markets]
+    if ev_bucket_labels:
+        ranges = [(lo, hi) for label, lo, hi in EV_BUCKETS if label in ev_bucket_labels]
+        bets = [
+            b for b in bets if b["expected_value"] is not None
+            and any(lo <= b["expected_value"] < hi for lo, hi in ranges)
+        ]
+    if odds_bucket_labels:
+        ranges = [(lo, hi) for label, lo, hi in ODDS_BUCKETS if label in odds_bucket_labels]
+        bets = [
+            b for b in bets if b["odds"] is not None
+            and any(lo <= b["odds"] < hi for lo, hi in ranges)
+        ]
     return bets
 
 
@@ -484,8 +500,7 @@ def api_stats():
     by_market = database.fetchall(conn, f"SELECT market, {BREAKDOWN_COLS} FROM bets GROUP BY market ORDER BY total DESC")
 
     ev_buckets = []
-    for label, lo, hi in [("0-1%", 100, 101), ("1-2%", 101, 102), ("2-5%", 102, 105),
-                           ("5-10%", 105, 110), ("10-20%", 110, 120), ("20%+", 120, 9999)]:
+    for label, lo, hi in EV_BUCKETS:
         r = database.fetchone(conn, f"""
             SELECT {BREAKDOWN_COLS}
             FROM bets WHERE expected_value >= ? AND expected_value < ?
@@ -493,9 +508,7 @@ def api_stats():
         ev_buckets.append({"label": label, **r})
 
     odds_buckets = []
-    for label, lo, hi in [("1.01-1.30", 1.01, 1.30), ("1.30-1.60", 1.30, 1.60),
-                           ("1.60-2.00", 1.60, 2.00), ("2.00-2.50", 2.00, 2.50),
-                           ("2.50-3.50", 2.50, 3.50), ("3.50+", 3.50, 9999)]:
+    for label, lo, hi in ODDS_BUCKETS:
         r = database.fetchone(conn, f"""
             SELECT {BREAKDOWN_COLS}
             FROM bets WHERE odds >= ? AND odds < ?
@@ -653,21 +666,55 @@ INDEX_HTML = """<!DOCTYPE html>
   }
   .filter-toggle-btn:hover { border-color:var(--blue); }
   .filter-toggle-btn.active { border-color:var(--blue); color:var(--blue); }
-  .filters-extra {
-    padding:0 32px 12px; display:none; flex-wrap:wrap; gap:10px; align-items:center;
+  .filter-count {
+    display:inline-block; background:var(--blue); color:#fff; border-radius:10px;
+    font-size:10px; padding:1px 6px; margin-left:6px; font-weight:700;
   }
-  .filters-extra.open { display:flex; }
-  .filters-extra input {
-    background:var(--card); color:var(--text); border:1px solid var(--border);
-    border-radius:6px; padding:6px 10px; font-size:13px; width:90px;
-  }
-  .filters-extra input:focus, .filters select:focus { outline:none; border-color:var(--blue); }
-  .filters-extra label { font-size:12px; color:var(--dim); display:flex; align-items:center; gap:6px; }
   .clear-filters-btn {
     background:none; color:var(--dim); border:1px solid var(--border); border-radius:6px;
     padding:6px 12px; font-size:12px; cursor:pointer;
   }
   .clear-filters-btn:hover { color:var(--text); border-color:var(--red); }
+
+  .modal-overlay {
+    position:fixed; inset:0; background:rgba(0,0,0,.6); display:flex;
+    align-items:center; justify-content:center; z-index:100;
+  }
+  .modal-box {
+    background:var(--card); border:1px solid var(--border); border-radius:12px;
+    width:min(560px, 92vw); max-height:85vh; display:flex; flex-direction:column;
+  }
+  .modal-header {
+    display:flex; justify-content:space-between; align-items:center;
+    padding:16px 20px; border-bottom:1px solid var(--border);
+  }
+  .modal-header h3 { font-size:15px; font-weight:600; }
+  .modal-close {
+    background:none; border:none; color:var(--dim); font-size:20px; cursor:pointer; line-height:1;
+  }
+  .modal-close:hover { color:var(--text); }
+  .modal-body { padding:16px 20px; overflow-y:auto; flex:1; }
+  .filter-group { margin-bottom:18px; }
+  .filter-group h4 {
+    font-size:11px; text-transform:uppercase; letter-spacing:.5px; color:var(--dim);
+    margin-bottom:8px; font-weight:600;
+  }
+  .checkbox-list { display:flex; flex-wrap:wrap; gap:8px; }
+  .checkbox-list label {
+    display:flex; align-items:center; gap:5px; font-size:12px; background:var(--bg);
+    border:1px solid var(--border); border-radius:6px; padding:5px 9px; cursor:pointer;
+  }
+  .checkbox-list label:hover { border-color:var(--blue); }
+  .checkbox-list input { cursor:pointer; }
+  .modal-footer {
+    display:flex; justify-content:flex-end; gap:10px; padding:14px 20px;
+    border-top:1px solid var(--border);
+  }
+  .filter-apply-btn {
+    background:var(--blue); color:#fff; border:none; border-radius:6px;
+    padding:7px 16px; font-size:13px; font-weight:600; cursor:pointer;
+  }
+  .filter-apply-btn:hover { opacity:.9; }
 
   .track-btn {
     background:none; border:1px solid var(--border); border-radius:6px; cursor:pointer;
@@ -723,16 +770,28 @@ INDEX_HTML = """<!DOCTYPE html>
 </div>
 
 <div class="filters">
-  <select id="filter-sport"><option value="">All Sports</option></select>
-  <select id="filter-bookmaker"><option value="">All Bookmakers</option></select>
-  <button class="filter-toggle-btn" id="filter-toggle-btn">Filters</button>
+  <button class="filter-toggle-btn" id="filter-toggle-btn">Filters<span class="filter-count" id="filter-count" style="display:none"></span></button>
   <button class="clear-filters-btn" id="clear-filters-btn" style="display:none">Clear filters</button>
 </div>
-<div class="filters-extra" id="filters-extra">
-  <select id="filter-market"><option value="">All Markets</option></select>
-  <label>Min odds <input type="number" step="0.01" id="filter-odds-min" placeholder="1.00"></label>
-  <label>Max odds <input type="number" step="0.01" id="filter-odds-max" placeholder="10.0"></label>
-  <label>Min EV % <input type="number" step="0.1" id="filter-ev-min" placeholder="0"></label>
+
+<div class="modal-overlay" id="filter-modal-overlay" style="display:none">
+  <div class="modal-box">
+    <div class="modal-header">
+      <h3>Filter Preferences</h3>
+      <button class="modal-close" id="filter-modal-close">&times;</button>
+    </div>
+    <div class="modal-body">
+      <div class="filter-group"><h4>Sports</h4><div class="checkbox-list" id="cb-sport"></div></div>
+      <div class="filter-group"><h4>Bookmakers</h4><div class="checkbox-list" id="cb-bookmaker"></div></div>
+      <div class="filter-group"><h4>Markets</h4><div class="checkbox-list" id="cb-market"></div></div>
+      <div class="filter-group"><h4>Value (EV) buckets</h4><div class="checkbox-list" id="cb-ev_bucket"></div></div>
+      <div class="filter-group"><h4>Odds ranges</h4><div class="checkbox-list" id="cb-odds_bucket"></div></div>
+    </div>
+    <div class="modal-footer">
+      <button class="clear-filters-btn" id="modal-clear-btn">Clear all</button>
+      <button class="filter-apply-btn" id="modal-apply-btn">Apply</button>
+    </div>
+  </div>
 </div>
 
 <div class="content">
@@ -755,49 +814,101 @@ document.querySelectorAll('.tab').forEach(t => {
     document.getElementById('tab-' + currentTab).style.display = '';
     const showFilters = currentTab === 'live' || currentTab === 'results';
     document.querySelector('.filters').style.display = showFilters ? '' : 'none';
-    document.getElementById('filters-extra').style.display = showFilters && filtersOpen ? 'flex' : 'none';
     refresh();
   });
 });
 
-let filtersOpen = false;
+// Filter preferences persist across reloads via localStorage -- the dashboard keeps
+// logging every bet regardless; this only controls what's *shown*.
+const EV_BUCKET_LABELS = ['0-1%', '1-2%', '2-5%', '5-10%', '10-20%', '20%+'];
+const ODDS_BUCKET_LABELS = ['1.01-1.30', '1.30-1.60', '1.60-2.00', '2.00-2.50', '2.50-3.50', '3.50+'];
+const FILTER_GROUPS = ['sport', 'bookmaker', 'market', 'ev_bucket', 'odds_bucket'];
+
+function loadFilterPrefs() {
+  try {
+    const saved = JSON.parse(localStorage.getItem('dashboardFilters') || '{}');
+    const prefs = {};
+    FILTER_GROUPS.forEach(g => { prefs[g] = Array.isArray(saved[g]) ? saved[g] : []; });
+    return prefs;
+  } catch(e) {
+    const prefs = {};
+    FILTER_GROUPS.forEach(g => prefs[g] = []);
+    return prefs;
+  }
+}
+
+let filterPrefs = loadFilterPrefs();
+
+function saveFilterPrefs() {
+  localStorage.setItem('dashboardFilters', JSON.stringify(filterPrefs));
+}
+
+function updateFilterUi() {
+  const count = FILTER_GROUPS.reduce((n, g) => n + filterPrefs[g].length, 0);
+  document.getElementById('filter-count').style.display = count ? '' : 'none';
+  document.getElementById('filter-count').textContent = count;
+  document.getElementById('filter-toggle-btn').classList.toggle('active', count > 0);
+  document.getElementById('clear-filters-btn').style.display = count ? '' : 'none';
+}
+
+function populateCheckboxList(id, group, options) {
+  const el = document.getElementById(id);
+  const checked = new Set(filterPrefs[group]);
+  el.innerHTML = options.map(o =>
+    '<label><input type="checkbox" value="' + o + '"' + (checked.has(o) ? ' checked' : '') + '> ' + o + '</label>'
+  ).join('');
+}
+
+function populateFilterModal(s) {
+  const sports = (s.by_sport || []).map(r => r.sport).filter(Boolean).sort();
+  const bookmakers = (s.by_bookmaker || []).map(r => r.bookmaker).filter(Boolean).sort();
+  const markets = (s.by_market || []).map(r => r.market).filter(Boolean).sort();
+  populateCheckboxList('cb-sport', 'sport', sports);
+  populateCheckboxList('cb-bookmaker', 'bookmaker', bookmakers);
+  populateCheckboxList('cb-market', 'market', markets);
+  populateCheckboxList('cb-ev_bucket', 'ev_bucket', EV_BUCKET_LABELS);
+  populateCheckboxList('cb-odds_bucket', 'odds_bucket', ODDS_BUCKET_LABELS);
+}
+
 document.getElementById('filter-toggle-btn').addEventListener('click', () => {
-  filtersOpen = !filtersOpen;
-  document.getElementById('filter-toggle-btn').classList.toggle('active', filtersOpen);
-  document.getElementById('filters-extra').classList.toggle('open', filtersOpen);
+  document.getElementById('filter-modal-overlay').style.display = 'flex';
+});
+document.getElementById('filter-modal-close').addEventListener('click', () => {
+  document.getElementById('filter-modal-overlay').style.display = 'none';
+});
+document.getElementById('filter-modal-overlay').addEventListener('click', (e) => {
+  if (e.target.id === 'filter-modal-overlay') document.getElementById('filter-modal-overlay').style.display = 'none';
+});
+
+document.getElementById('modal-apply-btn').addEventListener('click', () => {
+  FILTER_GROUPS.forEach(g => {
+    filterPrefs[g] = [...document.querySelectorAll('#cb-' + g + ' input:checked')].map(i => i.value);
+  });
+  saveFilterPrefs();
+  updateFilterUi();
+  document.getElementById('filter-modal-overlay').style.display = 'none';
+  refresh();
+});
+
+document.getElementById('modal-clear-btn').addEventListener('click', () => {
+  FILTER_GROUPS.forEach(g => filterPrefs[g] = []);
+  document.querySelectorAll('.checkbox-list input').forEach(i => i.checked = false);
+  saveFilterPrefs();
+  updateFilterUi();
 });
 
 document.getElementById('clear-filters-btn').addEventListener('click', () => {
-  document.getElementById('filter-sport').value = '';
-  document.getElementById('filter-bookmaker').value = '';
-  document.getElementById('filter-market').value = '';
-  document.getElementById('filter-odds-min').value = '';
-  document.getElementById('filter-odds-max').value = '';
-  document.getElementById('filter-ev-min').value = '';
+  FILTER_GROUPS.forEach(g => filterPrefs[g] = []);
+  saveFilterPrefs();
+  updateFilterUi();
   refresh();
 });
 
 function qs() {
   const p = new URLSearchParams();
-  const sport = document.getElementById('filter-sport').value;
-  const bookmaker = document.getElementById('filter-bookmaker').value;
-  const market = document.getElementById('filter-market').value;
-  const oddsMin = document.getElementById('filter-odds-min').value;
-  const oddsMax = document.getElementById('filter-odds-max').value;
-  const evMin = document.getElementById('filter-ev-min').value;
-  if (sport) p.set('sport', sport);
-  if (bookmaker) p.set('bookmaker', bookmaker);
-  if (market) p.set('market', market);
-  if (oddsMin) p.set('odds_min', oddsMin);
-  if (oddsMax) p.set('odds_max', oddsMax);
-  if (evMin) p.set('ev_min', evMin);
-  document.getElementById('clear-filters-btn').style.display = p.toString() ? '' : 'none';
+  FILTER_GROUPS.forEach(g => filterPrefs[g].forEach(v => p.append(g, v)));
   return p.toString() ? '?' + p.toString() : '';
 }
-
-['filter-sport', 'filter-bookmaker', 'filter-market', 'filter-odds-min', 'filter-odds-max', 'filter-ev-min'].forEach(id => {
-  document.getElementById(id).addEventListener('change', refresh);
-});
 
 function fmtEv(v) { return '+' + (v - 100).toFixed(1) + '%'; }
 function fmtOdds(v) { return v ? parseFloat(v).toFixed(2) : '-'; }
@@ -1074,27 +1185,15 @@ async function refresh() {
     document.getElementById('tab-results').innerHTML = renderTable(results, true);
     document.getElementById('tab-breakdown').innerHTML = renderBreakdown(s);
 
-    // populate filter dropdowns
-    const sports = new Set(), bookmakers = new Set(), markets = new Set();
-    [...live, ...results].forEach(b => { if(b.sport) sports.add(b.sport); if(b.bookmaker) bookmakers.add(b.bookmaker); if(b.market) markets.add(b.market); });
-    updateSelect('filter-sport', [...sports].sort());
-    updateSelect('filter-bookmaker', [...bookmakers].sort());
-    updateSelect('filter-market', [...markets].sort());
+    // Populated from the (unfiltered) stats breakdowns, not the filtered live/results
+    // lists -- otherwise checking a filter would shrink the list of options to pick from.
+    populateFilterModal(s);
+    updateFilterUi();
 
     document.getElementById('status').textContent = 'Last updated: ' + new Date().toLocaleTimeString();
   } catch(e) {
     document.getElementById('status').textContent = 'Error: ' + e.message;
   }
-}
-
-const SELECT_LABELS = {'filter-sport': 'All Sports', 'filter-bookmaker': 'All Bookmakers', 'filter-market': 'All Markets'};
-
-function updateSelect(id, options) {
-  const sel = document.getElementById(id);
-  const cur = sel.value;
-  const label = SELECT_LABELS[id] || '';
-  const html = '<option value="">' + label + '</option>' + options.map(o => '<option value="'+o+'"' + (o===cur?' selected':'') + '>'+o+'</option>').join('');
-  if (sel.innerHTML !== html) sel.innerHTML = html;
 }
 
 function renderTrackerStats(t) {
