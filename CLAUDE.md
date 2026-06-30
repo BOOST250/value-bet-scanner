@@ -11,7 +11,7 @@ CLV (closing-line value) tracking against Pinnacle via the BettingIsCool API has
 ## Running
 
 ```bash
-# Scanner — uses DEFAULT_BOOKMAKERS (currently Polymarket, Roobet)
+# Scanner — uses DEFAULT_BOOKMAKERS (currently Polymarket, TippmixPRO)
 python value_bet_alerts.py
 
 # Scanner with an explicit bookmaker pair (and optional sport filter)
