@@ -228,41 +228,7 @@ def attach_liquidity(bets: list) -> list:
         b["liquidity"] = None
         b["liquidity_price"] = None
 
-    polymarket_bets = [b for b in bets if b.get("bookmaker") == "Polymarket" and b.get("event_url")]
-    slugs = {b["event_url"].rstrip("/").rsplit("/", 1)[-1] for b in polymarket_bets}
-    uncached_slugs = [s for s in slugs if not (_EVENT_CACHE.get(s) and time.time() - _EVENT_CACHE[s][0] < _CACHE_TTL)]
-    if uncached_slugs:
-        with ThreadPoolExecutor(max_workers=20) as pool:
-            pool.map(get_event_markets, uncached_slugs)
-
-    token_by_bet: dict[int, str] = {}
-    for b in polymarket_bets:
-        slug = b["event_url"].rstrip("/").rsplit("/", 1)[-1]
-        markets = get_event_markets(slug)
-        if not markets:
-            continue
-        market = _find_market(markets, b.get("market"), b.get("hdp"), b.get("bet_side"), b.get("home"), b.get("away"))
-        if not market:
-            continue
-        token = _outcome_token(market, b.get("market"), b.get("bet_side"), b.get("home"), b.get("away"))
-        if token:
-            token_by_bet[id(b)] = token
-
-    uncached_tokens = [
-        t for t in set(token_by_bet.values())
-        if not (_BOOK_CACHE.get(t) and time.time() - _BOOK_CACHE[t][0] < _CACHE_TTL)
-    ]
-    if uncached_tokens:
-        with ThreadPoolExecutor(max_workers=20) as pool:
-            pool.map(get_order_book, uncached_tokens)
-
-    for b in polymarket_bets:
-        token = token_by_bet.get(id(b))
-        if not token:
-            continue
-        price, size = _best_ask_depth(get_order_book(token))
-        b["liquidity"] = size
-        b["liquidity_price"] = price
+    # Polymarket CLOB/Gamma APIs now require a paid plan — skip liquidity fetching.
 
     # Kalshi rate-limits on concurrency (~1 in-flight request per IP), not request volume --
     # any parallelism here returns a wave of 429s -- and the Railway-to-Kalshi network path
