@@ -975,7 +975,7 @@ function stakeUrl(b) {
   const league = b.league || '';
 
   if (rawSport === 'tennis') {
-    const tourMatch = league.match(/^(WTA|ATP)\s*-\s*([^,]+)/i);
+    const tourMatch = league.match(/^(WTA|ATP)\\s*-\\s*([^,]+)/i);
     if (tourMatch) {
       const tour = tourMatch[1].toLowerCase();
       const tournament = slugify(tourMatch[2]);
@@ -992,7 +992,7 @@ function stakeUrl(b) {
   if (dashIdx === -1 || !sport) return null;
   const country = slugify(league.slice(0, dashIdx));
   const leagueNameRaw = league.slice(dashIdx + 3).split(',')[0].trim();
-  const leagueWords = stripFederationPrefix(leagueNameRaw.split(/\s+/));
+  const leagueWords = stripFederationPrefix(leagueNameRaw.split(/\\s+/));
   const leagueSlug = slugify(leagueWords.join(' '));
   if (!country || !leagueSlug) return null;
   return `https://stake.com/sports/${sport}/${country}/${leagueSlug}/${idSlug}`;
