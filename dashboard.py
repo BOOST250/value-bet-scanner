@@ -434,6 +434,8 @@ NET_PROFIT_SQL = f"""CASE
 def api_stats():
     bm_filter = request.args.get("bookmaker", "")
     sp_filter = request.args.get("sport", "")
+    ev_min = request.args.get("ev_min", "")
+    odds_min = request.args.get("odds_min", "")
     filters = []
     params_base: tuple = ()
     if bm_filter:
@@ -442,6 +444,12 @@ def api_stats():
     if sp_filter:
         filters.append("sport = ?")
         params_base += (sp_filter,)
+    if ev_min:
+        filters.append("expected_value >= ?")
+        params_base += (float(ev_min),)
+    if odds_min:
+        filters.append("odds >= ?")
+        params_base += (float(odds_min),)
     extra_clause = ("AND " + " AND ".join(filters)) if filters else ""
     bm_clause = extra_clause
     bm_params_1 = params_base
