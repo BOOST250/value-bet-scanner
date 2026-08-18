@@ -432,10 +432,14 @@ NET_PROFIT_SQL = f"""CASE
 
 @app.route("/api/stats")
 def api_stats():
+    bm_filter = request.args.get("bookmaker", "")
+    bm_clause = "AND bookmaker = ?" if bm_filter else ""
+    bm_params_1 = (bm_filter,) if bm_filter else ()
+
     conn = database.get_conn()
-    total = database.fetchone(conn, "SELECT COUNT(*) total FROM bets")["total"]
+    total = database.fetchone(conn, f"SELECT COUNT(*) total FROM bets WHERE 1=1 {bm_clause}", bm_params_1)["total"]
     counts = {}
-    for r in database.fetchall(conn, "SELECT status, COUNT(*) c FROM bets GROUP BY status"):
+    for r in database.fetchall(conn, f"SELECT status, COUNT(*) c FROM bets WHERE 1=1 {bm_clause} GROUP BY status", bm_params_1):
         counts[r["status"]] = r["c"]
 
     wins = counts.get("won", 0)
@@ -446,12 +450,12 @@ def api_stats():
     profit = 0
     if wins:
         profit = sum(
-            r["odds"] - 1 for r in database.fetchall(conn, "SELECT odds FROM bets WHERE status='won'")
+            r["odds"] - 1 for r in database.fetchall(conn, f"SELECT odds FROM bets WHERE status='won' {bm_clause}", bm_params_1)
         )
     roi = ((profit - losses) / settled * 100) if settled else 0
 
     net_profit = database.fetchone(
-        conn, f"SELECT COALESCE(SUM({NET_PROFIT_SQL}), 0) net FROM bets WHERE status IN ('won','lost','push')"
+        conn, f"SELECT COALESCE(SUM({NET_PROFIT_SQL}), 0) net FROM bets WHERE status IN ('won','lost','push') {bm_clause}", bm_params_1
     )["net"]
     net_roi = (net_profit / settled * 100) if settled else 0
 
@@ -465,24 +469,24 @@ def api_stats():
                AVG(clv_true) avg_clv_true,
                COUNT(clv_raw) clv_n"""
 
-    by_bookmaker = database.fetchall(conn, f"SELECT bookmaker, {BREAKDOWN_COLS} FROM bets GROUP BY bookmaker")
-    by_sport = database.fetchall(conn, f"SELECT sport, {BREAKDOWN_COLS} FROM bets GROUP BY sport ORDER BY total DESC")
-    by_market = database.fetchall(conn, f"SELECT market, {BREAKDOWN_COLS} FROM bets GROUP BY market ORDER BY total DESC")
+    by_bookmaker = database.fetchall(conn, f"SELECT bookmaker, {BREAKDOWN_COLS} FROM bets WHERE 1=1 {bm_clause} GROUP BY bookmaker", bm_params_1)
+    by_sport = database.fetchall(conn, f"SELECT sport, {BREAKDOWN_COLS} FROM bets WHERE 1=1 {bm_clause} GROUP BY sport ORDER BY total DESC", bm_params_1)
+    by_market = database.fetchall(conn, f"SELECT market, {BREAKDOWN_COLS} FROM bets WHERE 1=1 {bm_clause} GROUP BY market ORDER BY total DESC", bm_params_1)
 
     ev_buckets = []
     for label, lo, hi in EV_BUCKETS:
         r = database.fetchone(conn, f"""
             SELECT {BREAKDOWN_COLS}
-            FROM bets WHERE expected_value >= ? AND expected_value < ?
-        """, (lo, hi))
+            FROM bets WHERE expected_value >= ? AND expected_value < ? {bm_clause}
+        """, (lo, hi) + bm_params_1)
         ev_buckets.append({"label": label, **r})
 
     odds_buckets = []
     for label, lo, hi in ODDS_BUCKETS:
         r = database.fetchone(conn, f"""
             SELECT {BREAKDOWN_COLS}
-            FROM bets WHERE odds >= ? AND odds < ?
-        """, (lo, hi))
+            FROM bets WHERE odds >= ? AND odds < ? {bm_clause}
+        """, (lo, hi) + bm_params_1)
         odds_buckets.append({"label": label, **r})
 
     time_buckets = []
@@ -494,7 +498,8 @@ def api_stats():
             WHERE match_date IS NOT NULL AND detected_at IS NOT NULL
               AND (julianday(match_date) - julianday(detected_at)) * 24 >= ?
               AND (julianday(match_date) - julianday(detected_at)) * 24 < ?
-        """, (lo_h, hi_h))
+              {bm_clause}
+        """, (lo_h, hi_h) + bm_params_1)
         time_buckets.append({"label": label, **r})
 
     database.close(conn)
