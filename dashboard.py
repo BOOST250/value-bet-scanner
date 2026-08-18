@@ -18,7 +18,11 @@ from flask import Flask, jsonify, request
 
 import db as database
 
-database.init_db()
+try:
+    database.init_db()
+except Exception as _db_init_err:
+    import sys
+    print(f"WARNING: DB init failed at startup ({_db_init_err}), will retry on first request", file=sys.stderr)
 
 app = Flask(__name__)
 
