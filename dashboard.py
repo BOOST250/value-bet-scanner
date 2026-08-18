@@ -967,7 +967,7 @@ function stripFederationPrefix(words) {
 function stakeUrl(b) {
   if (!b.event_url) return null;
   if (b.sport === 'Esports') return null;
-  const m = b.event_url.match(/\/sports\/([^\/]+?)(?:\/all)?$/);
+  const m = b.event_url.match(/\\/sports\\/([^\\/]+?)(?:\\/all)?$/);
   if (!m) return null;
   const idSlug = m[1];
   const rawSport = (b.sport || '').toLowerCase();
