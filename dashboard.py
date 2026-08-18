@@ -433,8 +433,18 @@ NET_PROFIT_SQL = f"""CASE
 @app.route("/api/stats")
 def api_stats():
     bm_filter = request.args.get("bookmaker", "")
-    bm_clause = "AND bookmaker = ?" if bm_filter else ""
-    bm_params_1 = (bm_filter,) if bm_filter else ()
+    sp_filter = request.args.get("sport", "")
+    filters = []
+    params_base: tuple = ()
+    if bm_filter:
+        filters.append("bookmaker = ?")
+        params_base += (bm_filter,)
+    if sp_filter:
+        filters.append("sport = ?")
+        params_base += (sp_filter,)
+    extra_clause = ("AND " + " AND ".join(filters)) if filters else ""
+    bm_clause = extra_clause
+    bm_params_1 = params_base
 
     conn = database.get_conn()
     total = database.fetchone(conn, f"SELECT COUNT(*) total FROM bets WHERE 1=1 {bm_clause}", bm_params_1)["total"]
